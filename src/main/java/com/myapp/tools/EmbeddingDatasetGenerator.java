@@ -9,6 +9,7 @@ import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStream;
+import java.security.DigestOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -23,6 +24,8 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Generates immutable benchmark JSONL files from the bundled corpus and a local Ollama model.
@@ -32,10 +35,17 @@ public final class EmbeddingDatasetGenerator {
     private final ObjectMapper objectMapper = JsonMapper.builder().build();
     private final Config config;
     private final OllamaEmbeddingClient client;
+    private String modelDigest;
+    private MessageDigest partialDigest;
 
     private EmbeddingDatasetGenerator(Config config) {
         this.config = config;
         this.client = new OllamaEmbeddingClient(config.ollamaUrl(), config.model(), objectMapper);
+    }
+
+    EmbeddingDatasetGenerator(Config config, OllamaEmbeddingClient client) {
+        this.config = config;
+        this.client = client;
     }
 
     public static void main(String[] args) {
@@ -43,20 +53,37 @@ public final class EmbeddingDatasetGenerator {
         new EmbeddingDatasetGenerator(config).run();
     }
 
-    private void run() {
+    void run() {
         System.out.printf("Embedding model=%s dimension=%d batch=%d endpoint=%s%n",
                 config.model(), config.dimension(), config.batchSize(), config.ollamaUrl());
-        String digest = client.modelDigest();
+        modelDigest = client.modelDigest();
+        if (modelDigest == null || modelDigest.isBlank() || "unavailable".equals(modelDigest)) {
+            throw new IllegalStateException("A verified model digest is required to generate or reuse embeddings");
+        }
+        validatePaths();
+        validateSource(config.documents(), RecordType.DOCUMENT);
+        validateSource(config.queries(), RecordType.QUERY);
+        // Refuse stale reuse before generating either output or rewriting any manifest.
+        if (!config.overwrite()) {
+            preflightExisting(config.documents(), config.documentOutput(), RecordType.DOCUMENT);
+            preflightExisting(config.queries(), config.queryOutput(), RecordType.QUERY);
+        }
+        boolean reusedCompleteDataset = !config.overwrite() && Files.isRegularFile(config.documentOutput())
+                && Files.isRegularFile(config.queryOutput()) && manifestMatchesCurrentDataset();
         GenerationResult documents = generate(config.documents(), config.documentOutput(), RecordType.DOCUMENT);
         GenerationResult queries = generate(config.queries(), config.queryOutput(), RecordType.QUERY);
         copyQueryDefinitions();
+        if (reusedCompleteDataset) {
+            System.out.println("Verified existing embedding dataset; preserved original manifest: " + config.manifestOutput());
+            return;
+        }
 
         Map<String, Object> manifest = new LinkedHashMap<>();
         manifest.put("generatedAt", Instant.now().toString());
         manifest.put("provider", "ollama");
         manifest.put("endpoint", config.ollamaUrl());
         manifest.put("model", config.model());
-        manifest.put("modelDigest", digest);
+        manifest.put("modelDigest", modelDigest);
         manifest.put("dimension", config.dimension());
         manifest.put("batchSize", config.batchSize());
         manifest.put("queryInstruction", "none");
@@ -75,27 +102,33 @@ public final class EmbeddingDatasetGenerator {
         long expectedRecords = countNonBlankLines(source);
         Path partial = sibling(output, output.getFileName() + ".partial");
         Path checkpoint = sibling(output, output.getFileName() + ".checkpoint.json");
+        Path provenance = sibling(output, output.getFileName() + ".provenance.json");
 
         if (config.overwrite()) {
             deleteIfExists(output);
             deleteIfExists(partial);
             deleteIfExists(checkpoint);
+            deleteIfExists(provenance);
         }
         if (Files.exists(output)) {
             if (Files.exists(partial) || Files.exists(checkpoint)) {
                 throw new IllegalStateException("Final and partial embedding outputs coexist: " + output);
             }
             GenerationResult existing = inspect(output, type, expectedRecords);
+            validateCompletedProvenance(source, output, type, existing);
             System.out.printf("Already complete: %s (%d records)%n", output, existing.records());
             return existing;
         }
 
         createParent(output);
+        partialDigest = newDigest();
+        if (Files.exists(partial)) updateDigest(partialDigest, partial);
         long completed = preparePartial(source, partial, checkpoint, type, inputHash);
         long started = System.nanoTime();
         try (BufferedReader reader = Files.newBufferedReader(source, StandardCharsets.UTF_8);
-             BufferedWriter writer = Files.newBufferedWriter(partial, StandardCharsets.UTF_8,
-                     StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
+             BufferedWriter writer = new BufferedWriter(new java.io.OutputStreamWriter(
+                     new DigestOutputStream(Files.newOutputStream(partial, StandardOpenOption.CREATE,
+                             StandardOpenOption.APPEND), partialDigest), StandardCharsets.UTF_8))) {
             skipNonBlank(reader, completed);
             List<InputRecord> batch = new ArrayList<>(config.batchSize());
             String line;
@@ -119,6 +152,14 @@ public final class EmbeddingDatasetGenerator {
             throw new IllegalStateException("Generated record count mismatch for " + source
                     + ": expected " + expectedRecords + " but got " + completed);
         }
+        if (!inputHash.equals(sha256(source)) || !modelDigest.equals(client.modelDigest())) {
+            throw new IllegalStateException("Source input or model digest changed during embedding generation");
+        }
+        GenerationResult generated = inspect(partial, type, expectedRecords);
+        // Publish provenance first, so a crash after publishing the final file remains recoverable.
+        writeJsonAtomically(provenance, Map.of("model", config.model(), "modelDigest", modelDigest,
+                "dimension", config.dimension(), "recordType", type.name(), "inputSha256", inputHash,
+                "outputSha256", generated.sha256(), "records", generated.records()));
         moveAtomically(partial, output);
         deleteIfExists(checkpoint);
         return inspect(output, type, expectedRecords);
@@ -139,12 +180,14 @@ public final class EmbeddingDatasetGenerator {
         if (!Files.exists(checkpoint)) throw new IllegalStateException("Partial output has no checkpoint: " + partial);
         JsonNode state = readJson(checkpoint);
         requireCheckpoint(state, "model", config.model());
+        requireCheckpoint(state, "modelDigest", modelDigest);
         requireCheckpoint(state, "inputSha256", inputHash);
-        if (state.get("dimension").asInt() != config.dimension()) {
+        requireCheckpoint(state, "outputSha256", digestSnapshot(partialDigest));
+        if (state.path("dimension").asInt() != config.dimension()) {
             throw new IllegalStateException("Partial output dimension does not match current configuration");
         }
         long completed = validatePartial(source, partial, type);
-        if (state.get("completedRecords").asLong() != completed) {
+        if (state.path("completedRecords").asLong(-1) != completed) {
             throw new IllegalStateException("Checkpoint count does not match partial output: " + partial);
         }
         System.out.printf("Resuming %s at record %d%n", partial, completed);
@@ -194,6 +237,8 @@ public final class EmbeddingDatasetGenerator {
         state.put("source", source.toString());
         state.put("inputSha256", inputHash);
         state.put("model", config.model());
+        state.put("modelDigest", modelDigest);
+        state.put("outputSha256", digestSnapshot(partialDigest));
         state.put("dimension", config.dimension());
         state.put("completedRecords", completed);
         writeJsonAtomically(checkpoint, state);
@@ -215,6 +260,13 @@ public final class EmbeddingDatasetGenerator {
                 if (!expectedId.equals(actualId)) {
                     throw new IllegalStateException("Partial output order mismatch at record " + count);
                 }
+                Map<String, Object> expectedFields = type.read(input, objectMapper).output();
+                for (Map.Entry<String, Object> field : expectedFields.entrySet()) {
+                    JsonNode expected = objectMapper.valueToTree(field.getValue());
+                    if (!expected.equals(output.get(field.getKey()))) {
+                        throw new IllegalStateException("Embedding output does not match source field " + field.getKey() + " at record " + count);
+                    }
+                }
                 validateVector(readVector(output));
                 count++;
             }
@@ -226,6 +278,7 @@ public final class EmbeddingDatasetGenerator {
 
     private GenerationResult inspect(Path output, RecordType type, long expectedRecords) {
         long records = 0;
+        Set<String> ids = new HashSet<>();
         double minNorm = Double.POSITIVE_INFINITY;
         double maxNorm = 0;
         try (BufferedReader reader = Files.newBufferedReader(output, StandardCharsets.UTF_8)) {
@@ -233,7 +286,8 @@ public final class EmbeddingDatasetGenerator {
             while ((line = reader.readLine()) != null) {
                 if (line.isBlank()) continue;
                 JsonNode row = objectMapper.readTree(line);
-                type.id(row);
+                String id = type.id(row);
+                if (id == null || id.isBlank() || !ids.add(id)) throw new IllegalStateException("Missing or duplicate output id: " + id);
                 float[] vector = readVector(row);
                 validateVector(vector);
                 double norm = norm(vector);
@@ -288,7 +342,10 @@ public final class EmbeddingDatasetGenerator {
         JsonNode embedding = node.get("embedding");
         if (embedding == null || !embedding.isArray()) throw new IllegalStateException("Output record has no embedding");
         float[] vector = new float[embedding.size()];
-        for (int i = 0; i < embedding.size(); i++) vector[i] = embedding.get(i).asFloat();
+        for (int i = 0; i < embedding.size(); i++) {
+            if (!embedding.get(i).isNumber()) throw new IllegalStateException("Embedding values must be numbers");
+            vector[i] = embedding.get(i).asFloat();
+        }
         return vector;
     }
 
@@ -306,7 +363,7 @@ public final class EmbeddingDatasetGenerator {
     private void requireCheckpoint(JsonNode state, String field, String expected) {
         JsonNode value = state.get(field);
         if (value == null || !expected.equals(value.asString())) {
-            throw new IllegalStateException("Partial output checkpoint has a different " + field);
+            throw new IllegalStateException("Embedding provenance has a missing or different " + field);
         }
     }
 
@@ -395,6 +452,109 @@ public final class EmbeddingDatasetGenerator {
         }
     }
 
+    private static MessageDigest newDigest() {
+        try { return MessageDigest.getInstance("SHA-256"); }
+        catch (NoSuchAlgorithmException exception) { throw new IllegalStateException(exception); }
+    }
+
+    private static void updateDigest(MessageDigest digest, Path path) {
+        try (InputStream input = Files.newInputStream(path)) {
+            byte[] buffer = new byte[8192];
+            for (int count; (count = input.read(buffer)) != -1;) digest.update(buffer, 0, count);
+        } catch (IOException exception) { throw new IllegalStateException("Cannot hash partial output " + path, exception); }
+    }
+
+    private static String digestSnapshot(MessageDigest digest) {
+        try { return HexFormat.of().formatHex(((MessageDigest) digest.clone()).digest()); }
+        catch (CloneNotSupportedException exception) { throw new IllegalStateException("SHA-256 snapshots are unavailable", exception); }
+    }
+
+    private void validatePaths() {
+        List<Path> inputs = List.of(config.documents().toAbsolutePath().normalize(), config.queries().toAbsolutePath().normalize());
+        List<Path> targets = new ArrayList<>(List.of(config.documentOutput(), config.queryOutput(), config.queryDefinitionsOutput(), config.manifestOutput()));
+        for (Path output : List.of(config.documentOutput(), config.queryOutput())) {
+            for (String suffix : List.of(".partial", ".checkpoint.json", ".checkpoint.json.tmp", ".provenance.json", ".provenance.json.tmp")) {
+                targets.add(sibling(output, output.getFileName() + suffix));
+            }
+        }
+        targets.add(sibling(config.queryDefinitionsOutput(), config.queryDefinitionsOutput().getFileName() + ".tmp"));
+        targets.add(sibling(config.manifestOutput(), config.manifestOutput().getFileName() + ".tmp"));
+        List<Path> outputs = targets.stream().map(path -> path.toAbsolutePath().normalize()).toList();
+        if (new HashSet<>(outputs).size() != outputs.size() || outputs.stream().anyMatch(inputs::contains)) {
+            throw new IllegalArgumentException("Embedding output paths must be distinct from each other and source inputs");
+        }
+    }
+
+    private boolean manifestMatchesCurrentDataset() {
+        if (!Files.isRegularFile(config.manifestOutput())) return false;
+        JsonNode manifest = readJson(config.manifestOutput());
+        return config.model().equals(manifest.path("model").asString())
+                && modelDigest.equals(manifest.path("modelDigest").asString())
+                && config.dimension() == manifest.path("dimension").asInt()
+                && sha256(config.documents()).equals(manifest.path("documentInput").path("sha256").asString())
+                && sha256(config.queries()).equals(manifest.path("queryInput").path("sha256").asString())
+                && sha256(config.documentOutput()).equals(manifest.path("documentOutput").path("sha256").asString())
+                && sha256(config.queryOutput()).equals(manifest.path("queryOutput").path("sha256").asString());
+    }
+
+    private void validateSource(Path source, RecordType type) {
+        requireReadableFile(source);
+        Set<String> ids = new HashSet<>();
+        try (BufferedReader reader = Files.newBufferedReader(source, StandardCharsets.UTF_8)) {
+            for (String line; (line = reader.readLine()) != null;) {
+                if (line.isBlank()) continue;
+                InputRecord record = type.read(objectMapper.readTree(line), objectMapper);
+                if (!ids.add(record.id())) throw new IllegalArgumentException("Duplicate embedding source id: " + record.id());
+            }
+        } catch (IOException exception) { throw new IllegalStateException("Cannot validate source " + source, exception); }
+        if (ids.isEmpty()) throw new IllegalArgumentException("Embedding source is empty: " + source);
+    }
+
+    private void preflightExisting(Path source, Path output, RecordType type) {
+        Path partial = sibling(output, output.getFileName() + ".partial");
+        Path checkpoint = sibling(output, output.getFileName() + ".checkpoint.json");
+        if (Files.exists(output)) {
+            if (Files.exists(partial) || Files.exists(checkpoint)) throw new IllegalStateException("Final and partial embedding outputs coexist: " + output);
+            validateCompletedProvenance(source, output, type, inspect(output, type, countNonBlankLines(source)));
+        } else if (Files.exists(partial) || Files.exists(checkpoint)) {
+            partialDigest = newDigest();
+            if (Files.exists(partial)) updateDigest(partialDigest, partial);
+            preparePartial(source, partial, checkpoint, type, sha256(source));
+        }
+    }
+
+    private void validateCompletedProvenance(Path source, Path output, RecordType type, GenerationResult result) {
+        Path provenance = sibling(output, output.getFileName() + ".provenance.json");
+        if (Files.isRegularFile(provenance)) {
+            JsonNode state = readJson(provenance);
+            requireCheckpoint(state, "model", config.model());
+            requireCheckpoint(state, "modelDigest", modelDigest);
+            requireCheckpoint(state, "inputSha256", sha256(source));
+            requireCheckpoint(state, "outputSha256", result.sha256());
+            requireCheckpoint(state, "recordType", type.name());
+            if (state.path("dimension").asInt() != config.dimension() || state.path("records").asLong(-1) != result.records()) {
+                throw new IllegalStateException("Completed output provenance has different dimension or record count: " + output);
+            }
+            validatePartial(source, output, type);
+            return;
+        }
+        // Existing manifests already contain all required provenance. Older unproven files must
+        // use a new output location or explicit overwrite; never relabel them with today's inputs.
+        if (!Files.isRegularFile(config.manifestOutput())) throw new IllegalStateException("Completed output has no provenance: " + output);
+        JsonNode manifest = readJson(config.manifestOutput());
+        requireCheckpoint(manifest, "model", config.model());
+        requireCheckpoint(manifest, "modelDigest", modelDigest);
+        String prefix = type == RecordType.DOCUMENT ? "document" : "query";
+        requireCheckpoint(manifest.path(prefix + "Input"), "sha256", sha256(source));
+        requireCheckpoint(manifest.path(prefix + "Output"), "sha256", result.sha256());
+        if (manifest.path("dimension").asInt() != config.dimension()
+                || manifest.path(prefix + "Input").path("records").asLong(-1) != result.records()
+                || manifest.path(prefix + "Output").path("records").asLong(-1) != result.records()) {
+            throw new IllegalStateException("Existing manifest dimension or record count differs: " + output);
+        }
+        validatePartial(source, output, type);
+    }
+
     private static Path sibling(Path path, String fileName) {
         Path parent = path.toAbsolutePath().getParent();
         if (parent == null) throw new IllegalArgumentException("Output path must have a parent: " + path);
@@ -472,7 +632,7 @@ public final class EmbeddingDatasetGenerator {
         }
     }
 
-    private record Config(
+    record Config(
             String ollamaUrl,
             String model,
             int dimension,

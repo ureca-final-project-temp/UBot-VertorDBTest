@@ -12,7 +12,7 @@ param(
     [ValidateSet(100000, 1000000)]
     [int]$Scale = 100000,
     [ValidateRange(3, 5)]
-    [int]$Repetitions = 3,
+    [int]$Repetitions = 5,
     [string]$ResultDirectory = 'benchmark-result/scale-validation'
 )
 

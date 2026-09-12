@@ -20,13 +20,13 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class ResultWriter {
-    private static final String PROTOCOL = "search-parameter-sweep-v1";
+    public static final String PROTOCOL = "fairness-sweep-v2";
     private static final String CSV_HEADER = "test_id,run_number,database,engine,index,actual_recall,comparison_recall,average_ms,p50_ms,p95_ms,p99_ms,qps,measurement_time_ms,resource_samples,"
             + "filtered_queries,filtered_recall,filtered_average_ms,filtered_p50_ms,filtered_p95_ms,filtered_p99_ms,"
             + "filtered_scored_queries,filtered_empty_ground_truth_queries,filtered_empty_ground_truth_violations,"
             + "unfiltered_queries,unfiltered_recall,unfiltered_average_ms,unfiltered_p50_ms,unfiltered_p95_ms,unfiltered_p99_ms,"
             + "unfiltered_scored_queries,unfiltered_empty_ground_truth_queries,unfiltered_empty_ground_truth_violations,"
-            + "cpu_average_percent,cpu_max_percent,ram_average_bytes,ram_max_bytes,disk_write_bytes,index_size_bytes,time_to_index_ready_ms,upsert_ms,vector_count,query_executions,concurrency,top_k,warmup_iterations,measurement_iterations,stability_verified,stability_diagnostics,index_parameters,search_parameters,environment,measured_at\n";
+            + "cpu_average_percent,cpu_max_percent,ram_average_bytes,ram_max_bytes,disk_write_bytes,index_size_bytes,time_to_index_ready_ms,upsert_ms,vector_count,query_executions,concurrency,top_k,warmup_iterations,measurement_iterations,stability_verified,stability_diagnostics,index_parameters,search_parameters,environment,measured_at,filtered_strict_id_recall,unfiltered_strict_id_recall,audit\n";
     private final ObjectMapper objectMapper;
 
     public ResultWriter(ObjectMapper objectMapper) {
@@ -232,6 +232,9 @@ public class ResultWriter {
         cells.add(csv(objectMapper.writeValueAsString(result.searchParameters())));
         cells.add(csv(objectMapper.writeValueAsString(result.environment())));
         cells.add(result.measuredAt().toString());
+        cells.add(csvNumber(result.filtered().strictIdRecall()));
+        cells.add(csvNumber(result.unfiltered().strictIdRecall()));
+        cells.add(csv(objectMapper.writeValueAsString(result.audit())));
         return String.join(",", cells) + System.lineSeparator();
     }
 
@@ -245,6 +248,40 @@ public class ResultWriter {
         cells.add(Integer.toString(segment.scoredQueries()));
         cells.add(Integer.toString(segment.emptyGroundTruthQueries()));
         cells.add(Integer.toString(segment.emptyGroundTruthViolations()));
+    }
+
+    public synchronized void writeTieGroundTruth(Map<String, ExactGroundTruth> truths, int topK, Path directory) {
+        try {
+            Path raw = directory.resolve("raw");
+            Files.createDirectories(raw);
+            StringBuilder lines = new StringBuilder();
+            for (var entry : truths.entrySet()) {
+                lines.append(objectMapper.writeValueAsString(Map.of("queryId", entry.getKey(),
+                        "topK", topK, "truth", entry.getValue()))).append('\n');
+            }
+            writeAtomic(raw.resolve("ground-truth-top" + topK + ".jsonl"), lines.toString());
+        } catch (IOException exception) {
+            throw new IllegalStateException("Cannot persist tie-aware ground truth", exception);
+        }
+    }
+
+    /** Lossless aggregation of identical repeated responses, after timing ends. */
+    public synchronized String writeQueryAudit(Map<BenchmarkRunner.QueryAuditKey, Integer> outcomes, Path directory) {
+        String filename = "raw/query-audit-" + UUID.randomUUID() + ".jsonl.gz";
+        try {
+            Files.createDirectories(directory.resolve("raw"));
+            try (var writer = new BufferedWriter(new java.io.OutputStreamWriter(
+                    new java.util.zip.GZIPOutputStream(Files.newOutputStream(directory.resolve(filename),
+                            StandardOpenOption.CREATE_NEW)), StandardCharsets.UTF_8))) {
+                for (var entry : outcomes.entrySet()) {
+                    writer.write(objectMapper.writeValueAsString(Map.of("outcome", entry.getKey(), "executions", entry.getValue())));
+                    writer.newLine();
+                }
+            }
+            return filename;
+        } catch (IOException exception) {
+            throw new IllegalStateException("Cannot persist query audit", exception);
+        }
     }
 
     private String decimal(double value, int scale) {

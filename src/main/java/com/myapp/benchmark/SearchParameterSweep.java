@@ -2,8 +2,12 @@ package com.myapp.benchmark;
 
 import com.myapp.port.VectorIndexManager;
 
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 
 /** Expands a grid without consulting Recall or choosing a quality target. */
 final class SearchParameterSweep {
@@ -13,15 +17,16 @@ final class SearchParameterSweep {
                                                  List<Integer> defaults) {
         String key = manager.searchParameterName();
         if (!scenario.searchParameters().isEmpty()) {
-            if (key != null && scenario.searchParameters().containsKey(key)) {
-                Object value = scenario.searchParameters().get(key);
-                if (!(value instanceof Number number) || !Double.isFinite(number.doubleValue())
-                        || number.doubleValue() != number.intValue()) {
-                    throw new IllegalArgumentException(key + " must be an integer");
-                }
-                validate(number.intValue(), scenario, manager);
+            if (key == null || key.isBlank()) {
+                throw new IllegalArgumentException("This index has no configurable search parameter");
             }
-            return List.of(scenario.searchParameters());
+            if (!scenario.searchParameters().keySet().equals(java.util.Set.of(key))) {
+                throw new IllegalArgumentException("searchParameters must contain only " + key);
+            }
+            int value = integerParameter(key, scenario.searchParameters().get(key));
+            validate(value, scenario, manager);
+            // Record exactly the integer the adapter receives, not an unchecked caller-supplied map.
+            return List.of(Map.of(key, value));
         }
         if (key == null || key.isBlank()) {
             if (!scenario.searchParameterValues().isEmpty()) {
@@ -36,6 +41,24 @@ final class SearchParameterSweep {
             validate(value, scenario, manager);
         }
         return values.stream().distinct().sorted().map(value -> Map.<String, Object>of(key, value)).toList();
+    }
+
+    /** A reproducible run-specific order avoids always measuring large values after small ones. */
+    static List<Map<String, Object>> parametersForRun(List<Map<String, Object>> grid, int runNumber) {
+        if (runNumber < 1) throw new IllegalArgumentException("runNumber must be positive");
+        List<Map<String, Object>> ordered = new ArrayList<>(grid);
+        Collections.shuffle(ordered, new Random(0x5EED5EEDL ^ runNumber));
+        return List.copyOf(ordered);
+    }
+
+    private static int integerParameter(String key, Object value) {
+        if (!(value instanceof Number number)) throw new IllegalArgumentException(key + " must be an integer");
+        try {
+            // intValue/doubleValue alone silently round high-precision fractional JSON numbers.
+            return new BigDecimal(number.toString()).intValueExact();
+        } catch (ArithmeticException | NumberFormatException exception) {
+            throw new IllegalArgumentException(key + " must be an integer in the 32-bit range", exception);
+        }
     }
 
     private static void validate(int value, BenchmarkScenario scenario, VectorIndexManager manager) {

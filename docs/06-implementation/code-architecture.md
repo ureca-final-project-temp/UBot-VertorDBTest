@@ -43,6 +43,11 @@ com.myapp
 | 벤치마크 전체 흐름 | `benchmark/BenchmarkRunner.java` |
 | 정답지 계산 | `benchmark/ExactSearchEngine.java` |
 | Recall@K 공식 | `benchmark/RecallCalculator.java` |
+| 경계 동점 전체를 포함한 정답 모델 | `benchmark/ExactGroundTruth.java` |
+| 반환 ID·필터·score 계약 검사 | `benchmark/ResponseContract.java` |
+| buildId·워밍업·오류·자원·query audit 연결 | `benchmark/MeasurementAudit.java` |
+| 독립 holdout plan·입력 중복 검사 | `benchmark/HoldoutGuard.java` |
+| 기존 자동 판정(현재 선정에 사용하지 않음) | `benchmark/DecisionGate.java` |
 | 전체 검색 파라미터 그리드 확장 | `benchmark/SearchParameterSweep.java` |
 | 지연시간 percentile, 필터/무필터 분리 | `benchmark/LatencyCollector.java` |
 | 구간별 결과 묶음 | `benchmark/QuerySegment.java` |
@@ -87,7 +92,7 @@ if (store == null) throw new IllegalStateException("No vector store is active. E
 - PostgreSQL Source of Truth 동기화와 Flyway migration은 검색 타이머 밖입니다.
 - 측정 타이머는 `store.search()`만 감쌉니다. 이 경계를 넓히지 않습니다.
 - `BenchmarkResult`는 record이며 필드 추가 시 `ResultWriter`의 CSV 헤더와 포맷을 함께 고칩니다.
-- 원시 JSON과 산포도 점은 실제 측정값입니다. 집계는 같은 파라미터의 실제 반복을 요약하며 평균을 새 실측점으로 표시하지 않습니다.
+- 원시 JSON과 작은 산포도 점은 실제 측정값입니다. 최신 6개 산포도의 큰 기호는 동일 설정 5회의 Recall 평균/나머지 지표 중앙값이며 요약점이라고 명시합니다. 한 회차의 실제 관측쌍이나 신뢰구간으로 오인시키지 않습니다.
 - 미지원 원시 자원값은 `-1`, 집계의 유효 표본이 없으면 `null`과 표본 수를 기록합니다.
 
 ## 테스트
@@ -111,8 +116,14 @@ if (store == null) throw new IllegalStateException("No vector store is active. E
 | `VectorIndexContractTest` | 14개 구성의 adapter engine/index/search 파라미터 계약 |
 | `QdrantIndexManagerTest` | exact-scan 대기 생략 경로에서도 payload index 검증 |
 | `VectorDatasetLoaderTest`, `QuerySetLoaderTest` | JSONL 필드 별칭, 필터 병합 |
+| `FairRecallTest` | 경계 동점의 제한된 인정, strict ID Recall, 반환 계약 |
+| `HoldoutGuardTest` | plan·입력 해시·이전 질의 중복 및 고정 설정 검증 |
+| `SearchParameterSweepTest` | 고정 검색 키·정수값 계약과 결정적 순서 |
+| `QdrantVectorStoreTest`, `WeaviateIndexManagerTest`, `WeaviateVectorStoreTest` | 반환 payload, schema·필터 타입 계약 |
 
-이번 실행 전 자동 테스트 42개가 통과했고, 이후 실제 DB로 372개 측정을 완료했습니다. 테스트 목록과 실행 근거는 [고정 산출물 안내](../07-results/assets/sweep-20260911-220549/README.md)에 있습니다.
+최신 v2 실행 전 테스트 결과는 74개·실패/오류 0개이고 이후 실제 DB의 620개 측정을 완료했습니다. 이는 남은 계측 설계 문제까지 없다는 뜻은 아닙니다. [최신 결과 보고서](../07-results/fairness-v2-results-20260913.md)에서 워밍업 170건과 Milvus DISKANN 5건의 경고를 함께 봅니다. 과거 42개 테스트·372개 측정은 v1 기록입니다.
+
+`BenchmarkSummary`가 호출하는 `DecisionGate`는 현재 코드에 남아 있으며 별도 조건이 없으면 Recall 0.95·p95 30ms·RAM 2GiB를 사용합니다. 합의되지 않은 이 기본값과 `decision.eligible`는 산포도 기반 프로젝트 선정 기준으로 채택하지 않습니다. 실제 실행 제한 4 vCPU/8GiB와 OpenSearch 4GiB 힙은 다른 개념입니다.
 
 DB 어댑터의 HTTP 계약 일부는 mock HTTP 단위 테스트로 검증하고, 실제 제품 API와 비동기
 준비 상태는 컨테이너 smoke/full benchmark로 검증합니다.

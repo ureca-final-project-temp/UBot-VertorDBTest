@@ -10,7 +10,7 @@ param(
     [Parameter(Mandatory)]
     [string]$QueryDefinitions,
     [ValidateRange(3, 5)]
-    [int]$Repetitions = 3,
+    [int]$Repetitions = 5,
     [ValidateRange(1, 1000000)]
     [int]$CalibrationQueryCount = 100,
     [string]$ResultDirectory = 'benchmark-result/real-workload-validation'

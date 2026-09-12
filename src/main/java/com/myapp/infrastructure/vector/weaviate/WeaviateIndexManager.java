@@ -39,7 +39,12 @@ public class WeaviateIndexManager implements VectorIndexManager {
                 property("externalId", "text"), property("documentId", "text"), property("chunkId", "text"),
                 property("content", "text"), property("metadataJson", "text")
         ));
-        properties.getFilterFields().forEach((name, type) -> fields.add(property(name, type)));
+        properties.getFilterFields().forEach((name, type) -> {
+            Map<String, Object> field = new LinkedHashMap<>(property(name, type));
+            // Equal must compare the complete, case-sensitive metadata value, not word tokens.
+            if (type.equalsIgnoreCase("text")) field.put("tokenization", "field");
+            fields.add(field);
+        });
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("class", properties.getClassName());
         body.put("vectorizer", "none");
@@ -85,6 +90,10 @@ public class WeaviateIndexManager implements VectorIndexManager {
         }
         config.put(parameterName, value);
         client.put("/v1/schema/" + properties.getClassName(), current);
+        JsonNode applied = client.get("/v1/schema/" + properties.getClassName()).path("vectorIndexConfig").path(parameterName);
+        if (!applied.isIntegralNumber() || applied.asInt() != value) {
+            throw new IllegalStateException("Weaviate did not apply " + parameterName + "=" + value + "; actual=" + applied);
+        }
     }
 
     @Override
@@ -133,6 +142,48 @@ public class WeaviateIndexManager implements VectorIndexManager {
                 "rqBits", 1,
                 "distance", distance(),
                 "dimension", properties.getDimension());
+    }
+
+    @Override
+    public Map<String, Object> diagnostics() {
+        JsonNode schema = client.get("/v1/schema/" + properties.getClassName());
+        if (!indexType().equals(schema.path("vectorIndexType").asString())) {
+            throw new IllegalStateException("Weaviate actual index type differs from requested " + indexType());
+        }
+        if (!distance().equals(schema.path("vectorIndexConfig").path("distance").asString())) {
+            throw new IllegalStateException("Weaviate actual distance differs from requested " + distance());
+        }
+        JsonNode config = schema.path("vectorIndexConfig");
+        if (indexType().equals("hnsw")) {
+            requireSetting(config, "maxConnections", properties.getHnswM());
+            requireSetting(config, "efConstruction", properties.getEfConstruction());
+        } else {
+            requireSetting(config, "maxPostingSizeKB", properties.getHfreshMaxPostingSizeKb());
+            requireSetting(config, "replicas", properties.getHfreshReplicas());
+        }
+        for (Map.Entry<String, String> declared : properties.getFilterFields().entrySet()) {
+            JsonNode actual = null;
+            for (JsonNode field : schema.path("properties")) {
+                if (declared.getKey().equals(field.path("name").asString())) actual = field;
+            }
+            if (actual == null || !actual.path("dataType").isArray() || actual.path("dataType").size() != 1
+                    || !declared.getValue().equalsIgnoreCase(actual.path("dataType").get(0).asString())) {
+                throw new IllegalStateException("Weaviate filter schema differs for " + declared.getKey());
+            }
+            if (declared.getValue().equalsIgnoreCase("text") && !"field".equals(actual.path("tokenization").asString())) {
+                throw new IllegalStateException("Weaviate equality filter requires field tokenization: " + declared.getKey());
+            }
+        }
+        // The server-filled schema records compression/rescore/sharding defaults, not just requested settings.
+        return Map.of("effectiveSchema", schema,
+                "nodes", client.get("/v1/nodes?output=verbose&class=" + properties.getClassName()));
+    }
+
+    private void requireSetting(JsonNode config, String key, int requested) {
+        JsonNode actual = config.path(key);
+        if (!actual.isIntegralNumber() || actual.asInt() != requested) {
+            throw new IllegalStateException("Weaviate actual " + key + " differs from requested " + requested + "; actual=" + actual);
+        }
     }
 
     private Map<String, Object> property(String name, String type) {

@@ -2,6 +2,8 @@
 
 이 데이터셋은 pgvector / Qdrant / Weaviate / Milvus / OpenSearch를 동일 조건에서 비교하기 위한 합성 기술문서 코퍼스다.
 
+실제 프로젝트의 예상 범위는 1,000~10,000개 청크다. 현재 완료 결과는 이 합성 데이터 10,000개만 사용했으며, 1k 규모와 실제 프로젝트 분포의 검증을 대신하지 않는다.
+
 ## 파일
 
 - `documents_10000.jsonl`: 10,000개 chunk record
@@ -21,8 +23,8 @@
 - `embeddings/embedding-manifest.json`
 - `queries/queries.jsonl`
 
-동일한 vector 파일을 모든 Vector DB에 재사용한다. 재생성 명령은 `./gradlew generateEmbeddings`이며,
-manifest의 model digest와 SHA-256이 실험 데이터 동일성의 기준이다.
+동일한 vector 파일을 모든 Vector DB에 재사용한다. 생성·검증 명령은 `./gradlew generateEmbeddings`이며,
+완성된 출력의 provenance가 검증되면 다시 생성하지 않고 재사용한다. manifest의 model digest와 SHA-256이 실험 데이터 동일성의 기준이다.
 
 DB benchmark에서는 embedding 생성 시간을 latency에 포함하지 않는다.
 
@@ -50,13 +52,13 @@ DB benchmark에서는 embedding 생성 시간을 latency에 포함하지 않는�
 ### 1. ANN 성능 비교
 각 query vector에 대해 Exact Top-K를 ground truth로 생성하고 ANN Top-K와 비교한다.
 
-`ANN Recall@10 = |Exact Top-10 ∩ ANN Top-10| / min(10, Exact 결과 수)`
+현재 `fairness-sweep-v2`의 주 Recall은 정확 검색의 K위 경계 동점을 인정한다. K위보다 좋은 ID 집합 A, K위 동점 전체 B, 반환 ID 집합 R에 대해 `(R∩A 수 + min(K-A 수, R∩B 수))/K`다. K는 `min(10, eligible 문서 수)`이고 기본 동점 허용 오차는 0이다. 기존 ID 교집합 공식은 `filtered.strictIdRecall`·`unfiltered.strictIdRecall`로 별도 보존한다.
 
 정답이 빈 질의는 Recall 평균에서 제외하고 빈 결과 반환 여부를 별도 기록한다.
 
-현재 14개 구성의 검색 파라미터 그리드를 전부 측정한다. Recall@10 0.90과 0.95는 산포도의 수평 참고선이며, 품질값으로 결과를 제거하지 않는다. 300개 query의 기존 분할은 유지하며 evaluation 200개로 모든 파라미터를 측정한다. calibration 100개는 추가 진단용이다. 이번 evaluation은 무필터 180개·필터 20개이며, 정답이 없는 필터 6개를 뺀 194개가 Recall 평균 대상이다.
+현재 14개 구성의 검색 파라미터 그리드를 전부 측정한다. 최신 다축 산포도의 Recall@10 0.80·0.90·0.95는 참고선이며 품질값으로 결과를 제거하지 않는다. 300개 query의 기존 분할은 유지하며 evaluation 200개로 모든 파라미터를 측정한다. calibration 100개는 추가 진단용이다. 이번 evaluation은 무필터 180개·필터 20개이며 정답이 없는 필터 6개를 뺀 194개가 Recall 평균 대상이다. QPS와 latency에는 빈 정답 질의도 포함된다. 전체 그리드를 본 뒤 고른 설정은 별도 holdout 검증을 마친 것이 아니다.
 
-이 입력으로 [372개 전체 sweep 측정](../docs/07-results/sweep-results-20260911.md)을 완료했다. 실행 입력 해시와 결과 근거는 [고정 산출물 안내](../docs/07-results/assets/sweep-20260911-220549/README.md)에 연결한다.
+이 입력으로 [최신 620개 v2 측정](../docs/07-results/fairness-v2-results-20260913.md)을 완료했다. 입력 해시와 결과 근거는 해당 보고서에서 확인한다. [과거 372개 v1 sweep](../docs/07-results/sweep-results-20260911.md)은 다른 채점·측정 조건의 역사 자료이며 최신 결과와 합산하지 않는다.
 
 `workloads/filter-selectivity/`는 `generateFilterSelectivityWorkloads`가 만드는 파생 입력이다.
 embedding은 바꾸지 않고 metadata만 1%/10%/50% cohort로 확장한다.

@@ -61,13 +61,19 @@ final class JsonlSupport {
         }
         if (array == null || array.isEmpty()) throw new IllegalArgumentException("Missing vector field");
         float[] vector = new float[array.size()];
-        for (int index = 0; index < array.size(); index++) vector[index] = (float) array.get(index).asDouble();
+        for (int index = 0; index < array.size(); index++) {
+            JsonNode value = array.get(index);
+            if (!value.isNumber()) throw new IllegalArgumentException("Vector values must be numbers at index " + index);
+            vector[index] = (float) value.asDouble();
+            if (!Float.isFinite(vector[index])) throw new IllegalArgumentException("Vector values must be finite at index " + index);
+        }
         return vector;
     }
 
     static Map<String, Object> object(JsonNode node, ObjectMapper mapper, String name) {
         JsonNode value = node.get(name);
-        if (value == null || !value.isObject()) return Map.of();
+        if (value == null || value.isNull()) return Map.of();
+        if (!value.isObject()) throw new IllegalArgumentException(name + " must be an object");
         Map<String, Object> result = new LinkedHashMap<>();
         for (Map.Entry<String, JsonNode> entry : value.properties()) {
             result.put(entry.getKey(), mapper.convertValue(entry.getValue(), Object.class));

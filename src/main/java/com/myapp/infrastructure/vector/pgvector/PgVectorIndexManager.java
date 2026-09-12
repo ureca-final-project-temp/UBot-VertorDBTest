@@ -5,6 +5,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.Duration;
 import java.util.Map;
+import java.util.List;
 
 public class PgVectorIndexManager implements VectorIndexManager {
     private final JdbcTemplate jdbcTemplate;
@@ -109,6 +110,51 @@ public class PgVectorIndexManager implements VectorIndexManager {
         parameters.put("dimension", properties.getDimension());
         parameters.put("force_index_scan", properties.isForceIndexScan());
         return Map.copyOf(parameters);
+    }
+
+    @Override
+    public Map<String, Object> diagnostics() {
+        List<Map<String, Object>> indexes = jdbcTemplate.queryForList("""
+                SELECT idx.relname AS index_name, am.amname AS access_method,
+                       i.indisvalid AS valid, i.indisready AS ready,
+                       pg_get_indexdef(idx.oid) AS definition,
+                       COALESCE(array_to_string(idx.reloptions, ','), '') AS options,
+                       format_type(a.atttypid, a.atttypmod) AS vector_type, opc.opcname AS operator_class
+                FROM pg_index i JOIN pg_class idx ON idx.oid = i.indexrelid
+                JOIN pg_am am ON am.oid = idx.relam
+                JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attname = 'embedding'
+                JOIN pg_opclass opc ON opc.oid = i.indclass[0]
+                WHERE idx.oid = to_regclass(?) AND i.indrelid = to_regclass(?)
+                """, indexName(), properties.getTable());
+        if (indexes.size() != 1) throw new IllegalStateException("pgvector expected index was not found: " + indexName());
+        Map<String, Object> actual = indexes.getFirst();
+        if (!Boolean.TRUE.equals(actual.get("valid")) || !Boolean.TRUE.equals(actual.get("ready"))
+                || !indexType().equals(actual.get("access_method"))
+                || !("vector(" + properties.getDimension() + ")").equals(actual.get("vector_type"))
+                || !operatorClass().equals(actual.get("operator_class"))) {
+            throw new IllegalStateException("pgvector actual index is not ready or differs from requested type/dimension/metric: " + actual);
+        }
+        Map<String, String> options = new java.util.HashMap<>();
+        for (String option : actual.get("options").toString().split(",")) {
+            String[] pair = option.split("=", 2);
+            if (pair.length == 2) options.put(pair[0], pair[1]);
+        }
+        if (indexType().equals("hnsw")) {
+            requireOption(options, "m", properties.getHnswM());
+            requireOption(options, "ef_construction", properties.getEfConstruction());
+        } else requireOption(options, "lists", properties.getIvfLists());
+        return Map.of("effectiveIndex", actual, "diagnosticConnectionSettings", jdbcTemplate.queryForList("""
+                SELECT name, setting, COALESCE(unit, '') AS unit, source FROM pg_settings
+                WHERE name IN ('shared_buffers', 'work_mem', 'maintenance_work_mem', 'effective_cache_size',
+                               'max_parallel_workers', 'max_parallel_maintenance_workers', 'enable_seqscan')
+                   OR name LIKE 'hnsw.%' OR name LIKE 'ivfflat.%' ORDER BY name
+                """));
+    }
+
+    private void requireOption(Map<String, String> options, String key, int requested) {
+        if (!Integer.toString(requested).equals(options.get(key))) {
+            throw new IllegalStateException("pgvector actual " + key + " differs from requested " + requested + "; actual=" + options.get(key));
+        }
     }
 
     private String indexName() {

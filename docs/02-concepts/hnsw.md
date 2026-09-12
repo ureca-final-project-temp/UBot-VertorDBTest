@@ -51,7 +51,7 @@ ef_construction = 128
 
 ## 전체 파라미터 sweep
 
-`searchParameters: {}`이면 `searchParameterValues` 또는 기본 그리드 전체를 측정합니다. 예를 들어 `[16, 32, 64, 96, 128]`에서 각 값의 Recall·latency·QPS·CPU·RAM을 모두 저장합니다. `repetitions: 3`은 이 고정 그리드를 세 번 반복합니다.
+`searchParameters: {}`이면 `searchParameterValues` 또는 기본 그리드 전체를 측정합니다. 예를 들어 `[16, 32, 64, 96, 128]`에서 각 값의 Recall·latency·QPS·CPU·RAM을 모두 저장합니다. 아래 `repetitions: 3`은 호출 형식 예시이며 현재 기본값이나 완료 실행의 횟수가 아닙니다. [fairness-v2 완료 실행](../07-results/fairness-v2-results-20260913.md)은 전체 재구축 5회이고, 현재 API도 `rebuildAndLoad=true`일 때 매 repetition 재구축합니다.
 
 ```json
 {"searchParameters": {}, "searchParameterValues": [16, 32, 64, 96, 128], "repetitions": 3}
@@ -66,6 +66,7 @@ Recall이 0.90·0.95를 넘더라도 측정을 계속합니다. 단조성 보정
 ```
 
 Weaviate는 검색 폭을 클래스 스키마로 적용하므로 파라미터별 실행은 순차적으로 진행합니다. 한 파라미터 안의 질의만 지정한 동시성으로 처리합니다.
+
 ## 주의: 비동기 인덱싱
 
 여러 DB가 적재 직후 인덱스를 아직 만들지 않은 상태로 검색을 받습니다.
@@ -79,6 +80,8 @@ Weaviate는 검색 폭을 클래스 스키마로 적용하므로 파라미터별
 - **OpenSearch** — 전체 적재 뒤 refresh와 force-merge 완료를 기다림
 - **Weaviate** — object count와 비동기 인덱싱의 `vectorQueueLength=0` 확인
 - **pgvector** — 적재 건수 확인; IVFFlat은 적재 후 인덱스를 생성하며 HNSW는 생성한 인덱스에 적재
+
+준비 장벽과 본 측정 중의 재현성은 다른 확인입니다. 특히 Milvus의 사후 `verified=true`가 모든 측정 응답의 안정성을 보증하지 않는 점은 [현재 한계](../03-benchmark-design/limitations.md)를 봅니다.
 
 ## 주의: ef를 올려도 느려지지 않는 구간
 

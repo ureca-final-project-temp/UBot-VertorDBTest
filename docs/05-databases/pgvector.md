@@ -17,22 +17,22 @@ IVFFlat은 `CREATE INDEX` 시점의 데이터로 centroid를 학습합니다. `r
 
 ## 필터
 
-metadata는 JSONB이고 `metadata ->> key = value`로 필터합니다. 기본 하네스는 metadata용 별도 B-tree/GIN을 만들지 않으므로 선택도별 `filtered_*` 결과를 반드시 따로 봅니다. 운영 설계를 검증할 때는 pgvector iterative scan과 실제 metadata index 전략을 별도 case로 추가해야 합니다.
+metadata는 JSONB이고 `metadata -> ? = ?::jsonb`로 필터해 문자열·숫자·boolean 타입을 보존합니다. 기본 하네스는 metadata용 별도 B-tree/GIN을 만들지 않으므로 `filtered_*` 결과를 반드시 따로 봅니다. 운영 설계를 검증할 때는 pgvector iterative scan과 실제 metadata index 전략을 별도 case로 추가해야 합니다.
 
 ## 크기
 
 실제 생성한 HNSW 또는 IVFFlat 인덱스 이름을 사용해 `pg_relation_size`를 기록합니다.
 
-## 2026-09-11 전체 sweep 실측
+## 최신 fairness-v2 실측 — 2026-09-13 완료
 
-[새 실험 보고서](../07-results/sweep-results-20260911.md)의 이 DB 측정은 다음과 같습니다. 각 범위는 **모든 검색 파라미터와 세 재구축 회차**를 포함합니다. 최소 p95와 최대 Recall이 같은 점이라는 뜻은 아닙니다.
+[최신 620개 결과](../07-results/fairness-v2-results-20260913.md) 중 이 DB의 실측입니다. 범위는 **모든 검색 파라미터와 다섯 재구축 회차**의 혼합 지표입니다. 최소 p95와 최대 Recall이 같은 점이라는 뜻은 아닙니다. 합성 10k·1024차원·동시성 10 조건이며 같은 Recall 수준의 설정을 6개 산포도로 비교합니다.
 
 | 구성 | 실제 검색 그리드 | 점 수 | Recall@10 범위 | 전체 p95 ms 범위 |
 |---|---|---:|---:|---:|
-| T01 / PostgreSQL / hnsw | ef_search: 10, 20, 40, 80, 120, 200, 400, 800, 1000 | 27 | 0.652577–0.957216 | 3.964–55.776 |
-| T03 / PostgreSQL / ivfflat | probes: 1, 2, 3, 4, 5, 6, 8, 10 | 24 | 0.848454–0.984536 | 19.695–76.895 |
+| T01 / PostgreSQL / hnsw | ef_search: 10, 20, 40, 80, 120, 200, 400, 800, 1000 | 45 | 0.668041–1.000000 | 3.809–57.979 |
+| T03 / PostgreSQL / ivfflat | probes: 1, 2, 3, 4, 5, 6, 8, 10 | 40 | 0.827835–1.000000 | 9.422–84.193 |
 
-모든 점을 [전체 산포도](../07-results/assets/sweep-20260911-220549/scatter-recall-latency-all-372.svg)에 표시했습니다. 같은 파라미터의 반복 변동과 CPU·RAM·QPS는 [반복 집계](../07-results/assets/sweep-20260911-220549/vector-db-summary.csv)와 [원시값](../07-results/assets/sweep-20260911-220549/all-measurements.json)을 함께 확인합니다. Recall 0.90·0.95는 참고선이며 낮은 품질의 점도 제거하지 않습니다.
+85개 중 워밍업 미달 7개를 포함해 모두 보존합니다. 요청마다 `set_config`와 벡터 검색을 별도 SQL로 보내는 비용이 포함되므로 DB 엔진 자체의 시간으로 단정하지 않습니다. [최신 보고서](../07-results/fairness-v2-results-20260913.md)에서 5회 산포·CPU·RAM·QPS를 함께 보고, 합의되지 않은 2GiB·30ms로 탈락시키지 않습니다. [2026-09-11 v1 결과](../07-results/sweep-results-20260911.md)는 역사 자료입니다.
 
 ## 참고
 

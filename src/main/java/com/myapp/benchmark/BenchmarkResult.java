@@ -38,7 +38,8 @@ public record BenchmarkResult(
         Map<String, Object> indexParameters,
         Map<String, Object> searchParameters,
         Map<String, Object> environment,
-        Instant measuredAt
+        Instant measuredAt,
+        MeasurementAudit audit
 ) {
     public BenchmarkResult {
         // Result files written before the segment split deserialize these as null.
@@ -56,5 +57,6 @@ public record BenchmarkResult(
         indexParameters = indexParameters == null ? Map.of() : Map.copyOf(indexParameters);
         searchParameters = searchParameters == null ? Map.of() : Map.copyOf(searchParameters);
         environment = environment == null ? Map.of() : Map.copyOf(environment);
+        audit = audit == null ? MeasurementAudit.unavailable() : audit;
     }
 }

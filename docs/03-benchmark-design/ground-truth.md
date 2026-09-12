@@ -2,6 +2,8 @@
 
 Recall 계산의 정답지입니다.
 
+현재 [fairness-v2 실측](../07-results/fairness-v2-results-20260913.md)은 K위 경계 동점을 인정하는 Recall을 사용하며 과거 strict-ID Recall도 별도 기록합니다. 아래 Top-K 정렬 자체와 실제 채점 규칙을 구분해야 합니다.
+
 ## DB가 아니라 Java로 만드는 이유
 
 각 DB에도 exact 검색 모드가 있지만 쓰지 않습니다.
@@ -40,6 +42,16 @@ Comparator.comparingDouble(VectorSearchResult::score).reversed()
 score 동점 시 id 오름차순으로 결정론적 순서를 만듭니다.
 같은 입력이면 항상 같은 정답지가 나옵니다.
 
+다만 K위에서 동점인 문서가 여러 개일 때 ID 정렬로 선택한 10개만 유일한 정답으로 취급하면 같은 거리의 다른 문서를 반환한 ANN을 부당하게 감점합니다. v2의 `ExactGroundTruth`는 결정론적 `strictTopK` 외에 원본 벡터의 K위보다 좋은 `strictlyBetterIds`와 경계 동점 전체 `boundaryIds`를 저장합니다. DB가 반환한 반올림 score로 동점을 판단하지 않습니다.
+
+```text
+A = K위보다 좋은 ID 집합, B = K위 경계 동점 ID 집합, R = 반환 ID 집합
+K = min(요청 topK, 필터를 만족하는 문서 수)
+tie-aware Recall@K = (|R∩A| + min(K−|A|, |R∩B|)) / K
+```
+
+K=0은 Recall 평균에서 제외합니다. 동점 허용 오차 기본값은 0이며 이번 입력에서 사용한 값도 0입니다. 더 좋은 이웃을 놓친 것을 동점 여러 개로 보상하지 않도록 동점 점수를 남은 자릿수로 제한합니다. strict-ID 교집합 Recall은 `filtered.strictIdRecall`과 `unfiltered.strictIdRecall`에서 따로 확인합니다.
+
 ## 성능 최적화
 
 각 문서의 L2 노름을 생성 시점에 한 번만 계산해 보관합니다.
@@ -59,7 +71,7 @@ cosine 계산에서 문서 노름을 매번 다시 구하지 않습니다.
 Ground Truth는 `topK`별로 한 번만 계산해 재사용합니다.
 
 ```java
-Map<Integer, Map<String, List<VectorSearchResult>>> groundTruthByTopK = new LinkedHashMap<>();
+Map<Integer, Map<String, ExactGroundTruth>> groundTruthByTopK = new LinkedHashMap<>();
 ...
 groundTruthByTopK.computeIfAbsent(scenario.topK(), ignored -> exactGroundTruth(...));
 ```
@@ -73,10 +85,10 @@ benchmark-result/<dir>/raw/ground-truth-top10.jsonl
 ```
 
 ```json
-{"queryId":"q-001","topK":["chunk-000-00","chunk-000-04", ...]}
+{"queryId":"q-001","topK":10,"truth":{"strictTopK":[...],"strictlyBetterIds":[...],"boundaryIds":[...],"boundaryScore":0.75,"tieTolerance":0.0}}
 ```
 
-이 파일로 다른 도구에서 Recall을 독립 재검산할 수 있습니다.
+위는 구조 설명용이며 실제 score·ID는 원시 파일을 확인합니다. 이 정답과 `raw/query-audit-*.jsonl.gz`의 반환 ID·실행 횟수를 함께 사용하면 Recall을 재검산할 수 있습니다. 과거 `topK` ID 목록만 있는 정답 파일은 별도 형식입니다.
 
 ## 정답이 비어 있는 질의
 

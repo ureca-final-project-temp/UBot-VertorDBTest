@@ -89,7 +89,7 @@ public class OpenSearchVectorStore implements VectorStore {
 
     private Map<String, Object> filter(Map<String, Object> filters) {
         List<Map<String, Object>> clauses = filters.entrySet().stream().map(entry -> {
-            String field = "metadata." + entry.getKey() + (entry.getValue() instanceof String ? ".keyword" : "");
+            String field = "metadata." + entry.getKey();
             return Map.<String, Object>of("term", Map.of(field, entry.getValue()));
         }).toList();
         return clauses.size() == 1 ? clauses.getFirst() : Map.of("bool", Map.of("filter", clauses));

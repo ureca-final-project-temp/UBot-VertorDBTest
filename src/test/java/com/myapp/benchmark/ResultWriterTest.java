@@ -24,7 +24,7 @@ class ResultWriterTest {
 
         List<String> lines = readCsv(directory);
         assertThat(lines).hasSize(2);
-        assertThat(columns(lines.getFirst())).hasSize(52);
+        assertThat(columns(lines.getFirst())).hasSize(55);
         assertThat(columns(lines.get(1))).hasSize(columns(lines.getFirst()).size());
         assertThat(lines.getFirst()).contains("filtered_p95_ms", "unfiltered_p95_ms", "unfiltered_recall");
         assertThat(lines.getFirst()).contains("comparison_recall");
@@ -113,6 +113,6 @@ class ResultWriterTest {
                 8.1, 3.6, 12.0, 40.0, 1820.5, 5000, 2, filtered, unfiltered,
                 131.6, 190.2, 95_000_000L, 102_000_000L, 4_096L, -1L, 5_143L, 3_891L, 10_000, 1_500, 10, 10, 1, 5,
                 StabilityDiagnostics.notRequired(),
-                Map.of("m", 16), Map.of("hnsw_ef", 400), Map.of("metric", "COSINE"), Instant.now());
+                Map.of("m", 16), Map.of("hnsw_ef", 400), Map.of("metric", "COSINE"), Instant.now(), null);
     }
 }

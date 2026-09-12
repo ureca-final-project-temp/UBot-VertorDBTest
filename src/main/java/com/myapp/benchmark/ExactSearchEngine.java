@@ -9,6 +9,7 @@ import com.myapp.domain.vector.VectorSearchResult;
 import java.util.Comparator;
 import java.util.List;
 import java.util.PriorityQueue;
+import java.util.LinkedHashSet;
 
 public class ExactSearchEngine {
     private static final Comparator<VectorSearchResult> BEST_FIRST = Comparator
@@ -45,9 +46,29 @@ public class ExactSearchEngine {
         return top.stream().sorted(BEST_FIRST).toList();
     }
 
+    public ExactGroundTruth groundTruth(VectorSearchRequest request, double tolerance) {
+        if (!Double.isFinite(tolerance) || tolerance < 0) {
+            throw new IllegalArgumentException("Tie tolerance must be finite and nonnegative");
+        }
+        List<VectorSearchResult> strict = search(request);
+        if (strict.isEmpty()) return new ExactGroundTruth(strict, java.util.Set.of(), java.util.Set.of(), null, tolerance);
+        double boundary = strict.getLast().score();
+        var better = new LinkedHashSet<String>();
+        var tied = new LinkedHashSet<String>();
+        float[] query = request.queryVector();
+        double queryNorm = norm(query);
+        // A second exact pass includes the ENTIRE boundary group, not merely K+1 neighbors.
+        for (IndexedDocument indexed : documents) {
+            if (!matches(indexed.document(), request.filter())) continue;
+            double score = similarity(query, queryNorm, indexed.embedding(), indexed.norm());
+            if (score > boundary + tolerance) better.add(indexed.document().id());
+            else if (Math.abs(score - boundary) <= tolerance) tied.add(indexed.document().id());
+        }
+        return new ExactGroundTruth(strict, better, tied, boundary, tolerance);
+    }
+
     private boolean matches(VectorDocument document, VectorFilter filter) {
-        return filter.equals().entrySet().stream()
-                .allMatch(entry -> entry.getValue().equals(document.metadata().get(entry.getKey())));
+        return filter.matches(document.metadata());
     }
 
     private double similarity(float[] left, double leftNorm, float[] right, double rightNorm) {

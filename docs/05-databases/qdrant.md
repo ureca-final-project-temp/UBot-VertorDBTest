@@ -51,7 +51,7 @@ POST /collections/benchmark_chunks/points/query
 {
   "query": [...],
   "limit": 10,
-  "with_payload": true,
+  "with_payload": ["id", "documentId", "chunkId"],
   "params": {"hnsw_ef": 400, "exact": false},
   "filter": {"must": [{"key": "metadata.tenant_id", "match": {"value": "alpha"}}]}
 }
@@ -63,7 +63,7 @@ POST /collections/benchmark_chunks/points/query
 
 이 하네스는 필터용 payload index를 생성하고 준비 상태를 확인합니다. 누락되면 의도한 필터 검색 조건과 다르므로 측정을 시작하지 않습니다. 실제 검색 경로는 필터 선택도와 내부 실행 계획의 영향도 받습니다.
 
-과거 1차 실행에서 관측한 증상이며 이번 372개 sweep 수치와는 구분합니다.
+과거 1차 실행에서 관측한 증상이며 최신 620개 v2 측정과는 구분합니다.
 
 ```text
 hnsw_ef  80 → 필터 질의 p95 130.74 ms
@@ -122,15 +122,15 @@ Invoke-RestMethod http://localhost:6333/collections/benchmark_chunks |
 - `infrastructure/vector/qdrant/QdrantIndexManager.java`
 - `infrastructure/vector/qdrant/QdrantProperties.java`
 
-## 2026-09-11 전체 sweep 실측
+## 최신 fairness-v2 실측 — 2026-09-13 완료
 
-[새 실험 보고서](../07-results/sweep-results-20260911.md)의 이 DB 측정은 다음과 같습니다. 각 범위는 **모든 검색 파라미터와 세 재구축 회차**를 포함합니다. 최소 p95와 최대 Recall이 같은 점이라는 뜻은 아닙니다.
+[최신 620개 결과](../07-results/fairness-v2-results-20260913.md) 중 이 DB의 실측입니다. 범위는 **모든 검색 파라미터와 다섯 재구축 회차**의 혼합 지표입니다. 최소 p95와 최대 Recall이 같은 점이라는 뜻은 아닙니다. 합성 10k·1024차원·동시성 10 조건입니다.
 
 | 구성 | 실제 검색 그리드 | 점 수 | Recall@10 범위 | 전체 p95 ms 범위 |
 |---|---|---:|---:|---:|
-| T05 / Native / hnsw | hnsw_ef: 10, 20, 40, 80, 120, 200, 400, 800, 1000 | 27 | 0.880928–0.983505 | 3.566–22.513 |
+| T05 / Native / hnsw | hnsw_ef: 10, 20, 40, 80, 120, 200, 400, 800, 1000 | 45 | 0.893814–1.000000 | 3.424–26.880 |
 
-모든 점을 [전체 산포도](../07-results/assets/sweep-20260911-220549/scatter-recall-latency-all-372.svg)에 표시했습니다. 같은 파라미터의 반복 변동과 CPU·RAM·QPS는 [반복 집계](../07-results/assets/sweep-20260911-220549/vector-db-summary.csv)와 [원시값](../07-results/assets/sweep-20260911-220549/all-measurements.json)을 함께 확인합니다. Recall 0.90·0.95는 참고선이며 낮은 품질의 점도 제거하지 않습니다.
+45개 중 워밍업 미달 17개를 포함해 모두 보존합니다. [최신 다축 산포도](../07-results/fairness-v2-results-20260913.md)에서 같은 Recall 수준의 설정끼리 5회 산포·CPU·RAM·QPS를 함께 판단하며 자동 승자를 정하지 않습니다. 본문·전체 metadata를 제외한 ID payload만 반환하도록 맞춘 v2이므로 [2026-09-11 v1 결과](../07-results/sweep-results-20260911.md)와 합산하지 않습니다.
 
 ## 참고
 

@@ -19,7 +19,7 @@ public record BenchmarkScenario(
 ) {
     public BenchmarkScenario {
         runNumber = runNumber == null || runNumber < 1 ? 1 : runNumber;
-        repetitions = repetitions == null || repetitions == 0 ? 3 : repetitions;
+        repetitions = repetitions == null || repetitions == 0 ? 5 : repetitions;
         if (repetitions < 1 || repetitions > 100) throw new IllegalArgumentException("repetitions must be in [1, 100]");
         if (testId != null && !testId.isBlank() && !testId.matches("T\\d{2}")) {
             throw new IllegalArgumentException("testId must match T followed by two digits");

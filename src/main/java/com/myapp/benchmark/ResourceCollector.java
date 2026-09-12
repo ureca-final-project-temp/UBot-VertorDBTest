@@ -94,6 +94,13 @@ public class ResourceCollector {
             }
         }
 
+        /** Counts completed captures without stopping the sampler while the workload is still running. */
+        public int sampleCount(long searchStarted, long searchEnded) {
+            synchronized (snapshots) {
+                return withinWindow(snapshots, searchStarted, searchEnded).size();
+            }
+        }
+
         public Usage usage(long searchStarted, long searchEnded) {
             executor.shutdownNow();
             synchronized (snapshots) {

@@ -29,10 +29,9 @@ pgvector만 검색 경로에서 JDBC를 쓰는 비대칭은
 - 로깅, 메트릭 수집
 - 결과 후처리(재정렬, 중복 제거, 추가 필터)
 
-DB가 잘못된 결과를 주면 그대로 반환합니다. Recall이 떨어져서 드러나는 것이 맞습니다.
+DB가 잘못된 결과를 주면 어댑터에서 조용히 정렬·중복 제거·재필터링하지 않습니다. 타이머 종료 후 `ResponseContract`가 unknown/중복 ID, document/chunk 불일치, 필터 위반, 비유한 score, topK 초과를 검사하고 위반 응답은 Recall 0과 감사 기록으로 남깁니다. 이것은 단순히 유효하지만 낮은 Recall인 결과와 구분합니다.
 
-예외는 제품이 요구하는 필수 동작뿐입니다. pgvector의 `set_config`가 그 예이며,
-그 비용은 문서에 명시합니다.
+현재 pgvector는 매 요청의 `set_config`와 검색을 별도 SQL로 실행하며 그 비용이 타이머에 포함됩니다. 현재 구현의 명시적 예외이지 제품 비교에서 무시해도 된다는 뜻은 아닙니다. Weaviate의 클래스 설정 변경은 타이머 밖이므로 이 비대칭을 결과 한계에 남깁니다.
 
 ## 3. 원본 id를 반환합니다
 
@@ -81,7 +80,7 @@ VectorHttpSupport.validateDimensions(documents, properties.getDimension());
 "적재가 끝났다"와 "인덱스로 검색할 수 있다"는 다릅니다.
 
 준비되지 않은 상태로 측정하면 exact 또는 전환 경로 수치를 ANN 수치로 기록하게 됩니다.
-Milvus는 index/load REST 상태뿐 아니라 query node의 Sealed/Flushed segment와 row 합계까지 확인합니다.
+Milvus는 index/load REST 상태뿐 아니라 query node의 Sealed/Flushed segment와 row 합계까지 확인합니다. 다만 현재 사후 Recall 진단과 오류 키 중심의 상태 검사로는 측정 중 상태 변동을 모두 검증하지 못합니다. 최신 DISKANN 5개 경고 사례를 `verified=true`만으로 정상이라고 단정하지 않습니다.
 
 ## 8. 선언한 실행 조건의 누락을 측정 전에 검사합니다
 
@@ -106,7 +105,11 @@ vector.weaviate.filter-fields: {tenant_id: text, status: text, ...}
 vector.qdrant.payload-index-fields: {tenant_id: keyword, status: keyword, ...}
 ```
 
-데이터셋의 metadata 키가 바뀌면 YAML만 고칩니다.
+이미 지원하는 scalar 타입의 필터 키 추가는 YAML에서 선언합니다. 새로운 타입·연산은 `MetadataContract`, `VectorFilter`, 정확 검색 및 모든 어댑터를 함께 검토합니다. JSON 숫자 표현 2/2.0은 같게 비교하되 문자열/boolean과 강제 변환하지 않고 키별 혼합 타입은 사전 거부합니다. Weaviate text equality는 `tokenization: field`, pgvector는 JSONB equality를 사용합니다.
+
+## 10. 관측과 선정 기준을 분리합니다
+
+입력·응답·자원 수집의 유효성 검사와 서비스 성능 판정은 다릅니다. 최신 프로젝트 범위는 1k~10k 청크이며 같은 Recall 수준의 설정끼리 다축 산포도와 5회 반복 변동을 보고 후보를 판단합니다. 원시 경고점을 지우지 않습니다. 코드의 `DecisionGate` 기본 2GiB·30ms는 합의된 기준이 아니므로 현재 선정에 적용하지 않으며, 문서 변경만으로 해당 구현이 제거된 것은 아닙니다.
 
 ## 새 어댑터 추가 체크리스트
 

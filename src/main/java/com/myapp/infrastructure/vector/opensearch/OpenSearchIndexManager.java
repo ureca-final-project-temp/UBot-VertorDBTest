@@ -120,6 +120,44 @@ public class OpenSearchIndexManager implements VectorIndexManager {
         return Map.copyOf(parameters);
     }
 
+    @Override
+    public Map<String, Object> diagnostics() {
+        JsonNode mappings = client.get("/" + properties.getIndex() + "/_mapping");
+        JsonNode settings = client.get("/" + properties.getIndex() + "/_settings?include_defaults=true");
+        JsonNode embedding = mappings.path(properties.getIndex()).path("mappings").path("properties").path("embedding");
+        JsonNode indexSettings = settings.path(properties.getIndex()).path("settings").path("index");
+        if (!"knn_vector".equals(embedding.path("type").asString())
+                || indexSettings.path("number_of_shards").asInt() != 1
+                || indexSettings.path("number_of_replicas").asInt() != 0) {
+            throw new IllegalStateException("OpenSearch actual vector mapping/shard/replica settings differ from requested configuration");
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("effectiveMappings", mappings);
+        result.put("effectiveSettingsIncludingDefaults", settings);
+        result.put("segments", client.get("/" + properties.getIndex() + "/_segments"));
+        if (properties.getIndexType().equals("ivf")) {
+            if (!properties.getIvfModelId().equals(embedding.path("model_id").asString())) {
+                throw new IllegalStateException("OpenSearch actual IVF model differs from requested model");
+            }
+            JsonNode model = client.get("/_plugins/_knn/models/" + properties.getIvfModelId());
+            if (!"created".equalsIgnoreCase(model.path("state").asString())) {
+                throw new IllegalStateException("OpenSearch IVF model is not ready: " + model);
+            }
+            result.put("effectiveModel", model);
+        } else {
+            JsonNode method = embedding.path("method");
+            if (embedding.path("dimension").asInt() != properties.getDimension()
+                    || !properties.getEngine().equals(method.path("engine").asString())
+                    || !properties.getIndexType().equals(method.path("name").asString())
+                    || !spaceType().equals(method.path("space_type").asString())
+                    || method.path("parameters").path("m").asInt() != properties.getHnswM()
+                    || method.path("parameters").path("ef_construction").asInt() != properties.getEfConstruction()) {
+                throw new IllegalStateException("OpenSearch actual vector method differs from requested configuration");
+            }
+        }
+        return Map.copyOf(result);
+    }
+
     private void createTargetIndex() {
         Map<String, Object> vector;
         if (properties.getIndexType().equals("ivf")) {
@@ -138,7 +176,10 @@ public class OpenSearchIndexManager implements VectorIndexManager {
         }
         client.put("/" + properties.getIndex(), Map.of(
                 "settings", Map.of("index", Map.of("knn", true, "number_of_shards", 1, "number_of_replicas", 0)),
-                "mappings", Map.of("properties", Map.of(
+                "mappings", Map.of("date_detection", false,
+                        "dynamic_templates", List.of(Map.of("metadata_strings", Map.of(
+                                "path_match", "metadata.*", "match_mapping_type", "string", "mapping", Map.of("type", "keyword")))),
+                        "properties", Map.of(
                         "id", Map.of("type", "keyword"),
                         "documentId", Map.of("type", "keyword"),
                         "chunkId", Map.of("type", "keyword"),

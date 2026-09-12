@@ -85,7 +85,7 @@ public class PgVectorStore implements VectorStore {
             String score = properties.getMetric() == DistanceMetric.COSINE ? "1 - (embedding " + operator + " ?)" : "-(embedding " + operator + " ?)";
             StringBuilder sql = new StringBuilder("SELECT id, document_id, chunk_id, ").append(score)
                     .append(" AS score FROM ").append(properties.getTable()).append(" WHERE true");
-            request.filter().equals().forEach((key, value) -> sql.append(" AND metadata ->> ? = ?"));
+            request.filter().equals().forEach((key, value) -> sql.append(" AND metadata -> ? = ?::jsonb"));
             sql.append(" ORDER BY embedding ").append(operator).append(" ? LIMIT ?");
             try (PreparedStatement statement = connection.prepareStatement(sql.toString())) {
                 int parameter = 1;
@@ -93,7 +93,7 @@ public class PgVectorStore implements VectorStore {
                 statement.setObject(parameter++, vector);
                 for (Map.Entry<String, Object> entry : request.filter().equals().entrySet()) {
                     statement.setString(parameter++, entry.getKey());
-                    statement.setString(parameter++, String.valueOf(entry.getValue()));
+                    statement.setString(parameter++, objectMapper.writeValueAsString(entry.getValue()));
                 }
                 statement.setObject(parameter++, vector);
                 statement.setInt(parameter, request.topK());

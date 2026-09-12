@@ -55,16 +55,18 @@ class BenchmarkRunnerTest {
     @Test
     void preservesCompletedMeasurementsIfALaterSearchFails() throws Exception {
         BenchmarkRunner runner = runner();
+        var order = SearchParameterSweep.parametersForRun(List.of(Map.of("ef", 16), Map.of("ef", 32), Map.of("ef", 64)), 1);
+        int failingParameter = (int) order.get(1).get("ef");
         doAnswer(invocation -> {
             VectorSearchRequest request = invocation.getArgument(0);
-            if (request.searchParameters().get("ef").equals(32)) throw new IllegalStateException("simulated search error");
+            if (request.searchParameters().get("ef").equals(failingParameter)) throw new IllegalStateException("simulated search error");
             return matches(8);
         }).when(store).search(any());
         assertThatThrownBy(() -> runner.run(List.of(scenario(1, List.of(16, 32, 64))), false))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("vector search failed");
-        assertThat(Files.readAllLines(directory.resolve("results/csv/vector-db-result.csv"))).hasSize(2);
+        assertThat(Files.readAllLines(directory.resolve("results/csv/vector-db-result.csv"))).hasSize(3);
         assertThat(Files.readString(directory.resolve("results/charts/recall-latency-latest.svg")))
-                .contains("1 measured points", "data-recall=\"0.80000000\"");
+                .contains("2 measured points", "data-recall=\"0.80000000\"");
         try (var failures = Files.list(directory.resolve("results/failures"))) {
             assertThat(failures.count()).isEqualTo(1);
         }
@@ -86,6 +88,29 @@ class BenchmarkRunnerTest {
                 10, 2, 0, 2, Map.of("ef", 16), List.of());
         assertThat(runner.run(List.of(fixed), false).results()).hasSize(3)
                 .allSatisfy(r -> assertThat(r.searchParameters()).isEqualTo(Map.of("ef", 16)));
+    }
+
+    @Test
+    void rebuildsEveryRepetitionAndRecordsDistinctBuildIds() throws Exception {
+        var output = runner().run(List.of(scenario(3, List.of(16))), true);
+        verify(manager, times(3)).rebuild(any());
+        verify(store, times(3)).upsert(any());
+        assertThat(output.results().stream().map(r -> r.audit().buildId()).distinct()).hasSize(3);
+        assertThat(output.results()).allSatisfy(r -> {
+            assertThat(r.audit().rebuilt()).isTrue();
+            assertThat(directory.resolve("results").resolve(r.audit().queryAuditFile())).exists();
+        });
+    }
+
+    @Test
+    void nonRebuildCostsAreUnavailableAndExploratoryResultsCannotPassFinalGate() throws Exception {
+        var output = runner().run(List.of(scenario(1, List.of(16))), false);
+        assertThat(output.results().getFirst().indexBuildTimeMs()).isEqualTo(-1);
+        assertThat(output.results().getFirst().upsertTimeMs()).isEqualTo(-1);
+        var group = BenchmarkSummary.aggregate(output.results()).getFirst();
+        assertThat(group.metrics().get("time_to_index_ready_ms").samples()).isZero();
+        assertThat(group.decision().eligible()).isFalse();
+        assertThat(group.decision().reasons()).contains("exploratory-not-independent-holdout", "index-not-rebuilt");
     }
 
     private BenchmarkScenario scenario(int repetitions, List<Integer> values) {

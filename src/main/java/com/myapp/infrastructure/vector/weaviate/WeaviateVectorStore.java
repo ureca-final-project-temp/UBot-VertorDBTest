@@ -15,6 +15,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.math.BigDecimal;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.stream.Collectors;
 
 public class WeaviateVectorStore implements VectorStore {
@@ -92,27 +95,57 @@ public class WeaviateVectorStore implements VectorStore {
             if (!properties.getFilterFields().containsKey(entry.getKey())) {
                 throw new IllegalArgumentException("Weaviate filter field is not declared: " + entry.getKey());
             }
-            Object value = entry.getValue();
-            String valueField;
-            String literal;
-            if (value instanceof Boolean) {
-                valueField = "valueBoolean";
-                literal = value.toString();
-            } else if (value instanceof Number) {
-                valueField = "valueNumber";
-                literal = value.toString();
-            } else {
-                valueField = "valueText";
-                literal = "\"" + escape(value.toString()) + "\"";
-            }
-            return "{path:[\"" + escape(entry.getKey()) + "\"],operator:Equal," + valueField + ":" + literal + "}";
+            String type = properties.getFilterFields().get(entry.getKey()).toLowerCase(Locale.ROOT);
+            return "{path:[" + objectMapper.writeValueAsString(entry.getKey()) + "],operator:Equal,"
+                    + filterLiteral(entry.getKey(), type, entry.getValue()) + "}";
         }).toList();
         String expression = operands.size() == 1 ? operands.getFirst() : "{operator:And,operands:[" + String.join(",", operands) + "]}";
         return ",where:" + expression;
     }
 
-    private String escape(String value) {
-        return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    private String filterLiteral(String field, String type, Object value) {
+        // GraphQL filter value types follow the declared schema, not the Java number implementation.
+        return switch (type) {
+            case "int" -> "valueInt:" + integer(field, value);
+            case "number" -> "valueNumber:" + number(field, value).toPlainString();
+            case "boolean" -> {
+                if (!(value instanceof Boolean)) throw invalidFilter(field, type);
+                yield "valueBoolean:" + value;
+            }
+            case "text", "uuid", "date" -> {
+                if (!(value instanceof String text)) throw invalidFilter(field, type);
+                if (type.equals("date")) {
+                    try {
+                        OffsetDateTime.parse(text);
+                    } catch (DateTimeParseException exception) {
+                        throw new IllegalArgumentException("Weaviate date filter must be an RFC3339 timestamp: " + field, exception);
+                    }
+                }
+                yield (type.equals("date") ? "valueDate:" : "valueText:") + objectMapper.writeValueAsString(text);
+            }
+            default -> throw new IllegalArgumentException("Unsupported Weaviate scalar equality filter type for " + field + ": " + type);
+        };
+    }
+
+    private BigDecimal number(String field, Object value) {
+        if (!(value instanceof Number)) throw invalidFilter(field, "number");
+        try {
+            return new BigDecimal(value.toString());
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException("Weaviate filter number must be finite: " + field, exception);
+        }
+    }
+
+    private long integer(String field, Object value) {
+        try {
+            return number(field, value).longValueExact();
+        } catch (ArithmeticException exception) {
+            throw new IllegalArgumentException("Weaviate int filter must be an exact 64-bit integer: " + field, exception);
+        }
+    }
+
+    private IllegalArgumentException invalidFilter(String field, String type) {
+        return new IllegalArgumentException("Weaviate filter value does not match declared " + type + " field: " + field);
     }
 
     @Override

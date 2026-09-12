@@ -41,7 +41,7 @@ BGE-M3는 L2 정규화된 벡터를 출력합니다. `embedding-manifest.json`�
 | distance metric | cosine | 스토어 metric과 다르면 실행 거부 |
 
 벡터를 다시 만들면 이전 결과와 비교할 수 없습니다.
-`generateEmbeddings`는 완성된 출력이 있으면 해시와 레코드 수만 검증하고 재생성하지 않습니다.
+`generateEmbeddings`는 완성된 출력이 있으면 manifest의 입력·모델·출력 provenance와 해시·레코드 수 등을 검증한 뒤 재사용합니다. 출처를 입증하지 못하는 출력은 건수만 맞는다고 재사용하지 않습니다. 현재 실측은 고정된 10k·1024차원이며 프로젝트의 1k~10k 범위 전체를 측정했다는 뜻은 아닙니다.
 
 ## 관련 문서
 

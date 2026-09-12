@@ -38,11 +38,7 @@ public class QdrantIndexManager implements VectorIndexManager {
         createPayloadIndexes();
     }
 
-    /**
-     * Qdrant only uses filtered HNSW when the filtered field carries a payload index.
-     * Without one it evaluates the filter by scanning every point, which makes filtered
-     * queries independent of hnsw_ef and dominates the latency tail.
-     */
+    /** Payload indexes permit cardinality-aware filtered search; Qdrant can still choose a scan for selective filters. */
     private void createPayloadIndexes() {
         properties.getPayloadIndexFields().forEach((key, schema) -> client.put(
                 "/collections/" + properties.getCollection() + "/index?wait=true",
@@ -87,8 +83,9 @@ public class QdrantIndexManager implements VectorIndexManager {
         throw new IllegalStateException("Qdrant HNSW index did not become ready within " + timeout);
     }
 
-    /** A missing payload index silently degrades filtered search to a full scan, so fail instead of measuring it. */
+    /** A missing declared payload index changes the intended index configuration, so fail instead of measuring it. */
     private void requirePayloadIndexes(JsonNode collection) {
+        if (collection == null || !collection.isObject()) throw new IllegalStateException("Qdrant returned no collection state");
         JsonNode schema = collection.get("payload_schema");
         List<String> missing = properties.getPayloadIndexFields().keySet().stream()
                 .map(this::payloadField)
@@ -96,7 +93,7 @@ public class QdrantIndexManager implements VectorIndexManager {
                 .toList();
         if (!missing.isEmpty()) {
             throw new IllegalStateException("Qdrant payload index is missing for " + missing
-                    + "; filtered search would fall back to a full scan");
+                    + "; filtered search would use a different configuration");
         }
     }
 
@@ -115,6 +112,31 @@ public class QdrantIndexManager implements VectorIndexManager {
                 "dimension", properties.getDimension(),
                 "payload_index_fields", properties.getPayloadIndexFields()
         );
+    }
+
+    @Override
+    public Map<String, Object> diagnostics() {
+        JsonNode collection = client.get("/collections/" + properties.getCollection()).get("result");
+        requirePayloadIndexes(collection);
+        JsonNode vectors = collection.path("config").path("params").path("vectors");
+        if (vectors.path("size").asInt() != properties.getDimension()
+                || !distance().equals(vectors.path("distance").asString())) {
+            throw new IllegalStateException("Qdrant actual vector configuration differs from the requested dimension/distance");
+        }
+        JsonNode config = collection.path("config");
+        requireSetting(config.path("hnsw_config"), "m", properties.getHnswM());
+        requireSetting(config.path("hnsw_config"), "ef_construct", properties.getEfConstruction());
+        requireSetting(config.path("hnsw_config"), "full_scan_threshold", properties.getFullScanThreshold());
+        requireSetting(config.path("optimizer_config"), "indexing_threshold", properties.getIndexingThreshold());
+        // Includes server-filled shard, replication, quantization and optimizer settings as well as current readiness.
+        return Map.of("effectiveCollection", collection);
+    }
+
+    private void requireSetting(JsonNode config, String key, int requested) {
+        JsonNode actual = config.path(key);
+        if (!actual.isIntegralNumber() || actual.asInt() != requested) {
+            throw new IllegalStateException("Qdrant actual " + key + " differs from requested " + requested + "; actual=" + actual);
+        }
     }
 
     private String distance() {

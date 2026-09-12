@@ -56,6 +56,8 @@ Comparator.comparingDouble(VectorSearchResult::score).reversed()
         .thenComparing(VectorSearchResult::id);
 ```
 
+이것은 strict Top-K 목록의 정렬 규칙입니다. 현재 v2 Recall은 K위와 같은 원본 벡터 score의 다른 ID도 남은 자릿수만큼 정답으로 인정합니다. ID 정렬만으로 동점 문제가 해결됐다고 보지 않으며 [경계 동점 채점](../03-benchmark-design/ground-truth.md)을 함께 읽습니다.
+
 ## 필터가 있는 Top-K
 
 필터가 있으면 "필터를 만족하는 문서 중 Top-10"이 정답입니다.

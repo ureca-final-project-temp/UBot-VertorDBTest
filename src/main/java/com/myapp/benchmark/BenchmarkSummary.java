@@ -19,6 +19,13 @@ public final class BenchmarkSummary {
             List<BenchmarkResult> samples = entry.getValue();
             Map<String, Distribution> metrics = new LinkedHashMap<>();
             add(metrics, "recall", samples, BenchmarkResult::actualRecall);
+            add(metrics, "unfiltered_recall", samples, r -> r.unfiltered().recall() == null ? -1 : r.unfiltered().recall());
+            add(metrics, "filtered_recall", samples, r -> r.filtered().recall() == null ? -1 : r.filtered().recall());
+            add(metrics, "unfiltered_strict_id_recall", samples, r -> r.unfiltered().strictIdRecall() == null ? -1 : r.unfiltered().strictIdRecall());
+            add(metrics, "filtered_strict_id_recall", samples, r -> r.filtered().strictIdRecall() == null ? -1 : r.filtered().strictIdRecall());
+            add(metrics, "search_failures", samples, r -> r.audit().searchFailures());
+            add(metrics, "invalid_response_queries", samples, r -> r.audit().invalidResponseQueries());
+            add(metrics, "no_hit_violations", samples, r -> r.filtered().emptyGroundTruthViolations() + r.unfiltered().emptyGroundTruthViolations());
             add(metrics, "average_ms", samples, BenchmarkResult::averageLatencyMs);
             add(metrics, "p50_ms", samples, BenchmarkResult::p50LatencyMs);
             add(metrics, "p95_ms", samples, BenchmarkResult::p95LatencyMs);
@@ -34,7 +41,7 @@ public final class BenchmarkSummary {
             add(metrics, "time_to_index_ready_ms", samples, BenchmarkResult::indexBuildTimeMs);
             return new Group(entry.getKey(), samples.size(),
                     samples.stream().map(BenchmarkResult::runNumber).toList(),
-                    samples.stream().map(result -> result.measuredAt().toString()).toList(), metrics);
+                    samples.stream().map(result -> result.measuredAt().toString()).toList(), metrics, DecisionGate.evaluate(samples));
         }).toList();
     }
 
@@ -58,7 +65,7 @@ public final class BenchmarkSummary {
     }
 
     public record Group(Configuration configuration, int completedMeasurements, List<Integer> runNumbers,
-                        List<String> measuredAt, Map<String, Distribution> metrics) { }
+                        List<String> measuredAt, Map<String, Distribution> metrics, DecisionGate.Verdict decision) { }
 
     /** Percentiles describe the distribution ACROSS repetitions, not pooled request latencies. */
     public record Distribution(int samples, Double mean, Double median, Double p95, Double p99,

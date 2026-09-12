@@ -39,6 +39,6 @@ class BenchmarkSummaryTest {
                 1, 1, p95, 10, 100, 5000, 2, QuerySegment.EMPTY, QuerySegment.EMPTY,
                 -1, -1, -1, -1, -1, -1, 10, 5, 100, 100, concurrency, 10, 1, 5,
                 StabilityDiagnostics.notRequired(), Map.of("m", 16), Map.of("ef", ef),
-                Map.of("documentVectorsSha256", hash), Instant.now());
+                Map.of("documentVectorsSha256", hash), Instant.now(), null);
     }
 }

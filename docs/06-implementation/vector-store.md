@@ -34,7 +34,7 @@ case DOT -> dot(...)                // 그대로
 case EUCLIDEAN -> -euclidean(...)   // 부호 반전
 ```
 
-Weaviate는 `1 - distance`, Milvus는 EUCLIDEAN일 때 `-distance`로 변환합니다.
+Weaviate cosine은 `1 - distance`, Milvus·Qdrant는 EUCLIDEAN일 때 반환 거리의 부호를 반전합니다. 이 score 정규화와 별개로 Recall의 정답·경계 동점은 원본 벡터 exact 검색에서 계산합니다.
 
 ## VectorIndexManager
 
@@ -67,7 +67,7 @@ default 구현이 있는 메서드는 **필요한 제품만 재정의합니다.*
 | `configureSearch()` | Weaviate | `ef`/`searchProbe`가 요청별이 아니라 클래스 설정 |
 | `awaitReady()` | 다섯 DB 모두 | 적재 건수·인덱스 생성·비동기 준비 상태 확인 |
 | `minimumSearchParameter()` / `maximumSearchParameter()` | IVF 계열 등 | 전체 그리드를 측정 전에 허용 범위와 대조 |
-| `diagnostics()` | Milvus | index/load/query-segment 상태와 drift 근거 |
+| `diagnostics()` | 다섯 DB 모두 | 실제 생성 설정/상태 readback; Milvus는 index/load/query-segment 상태 포함 |
 | `indexSizeBytes()` | pgvector, OpenSearch | 나머지는 미지원(`-1`) |
 
 `drop()`은 대상이 없어도 성공해야 합니다. 첫 실행에서 `rebuild()`가 실패하면 안 되기 때문입니다.
@@ -98,6 +98,7 @@ record VectorSearchRequest(float[] queryVector, int topK,
 
 - `queryVector`는 생성자와 accessor 양쪽에서 방어적 복사합니다.
 - `intParameter(name, fallback)`으로 어댑터가 자기 파라미터를 읽습니다.
+- 하네스는 실행 전 고정 파라미터 키와 정수값, 해당 인덱스의 허용 범위를 검증합니다.
 
 ```java
 int efSearch = request.intParameter("ef_search", properties.getDefaultEfSearch());
@@ -113,6 +114,8 @@ record VectorFilter(Map<String, Object> equals)
 range, IN, OR은 지원하지 않습니다. 확장하면 `ExactSearchEngine.matches()`와
 다섯 어댑터를 모두 같이 고쳐야 합니다.
 
+문자열·boolean·숫자는 JSON 타입을 보존합니다. 숫자 2와 2.0은 동등하지만 문자열 "2"와 숫자 2는 다릅니다. `MetadataContract`가 필터 키별 혼합 타입을 사전 거부합니다.
+
 ### VectorSearchResult
 
 ```java
@@ -121,6 +124,8 @@ record VectorSearchResult(String id, String documentId, String chunkId, double s
 
 `id`가 Recall 계산의 기준입니다. 어댑터는 DB가 생성한 내부 id가 아니라
 **원본 `id`를 반환해야 합니다.**
+
+`ResponseContract`는 본 측정 타이머가 종료된 후 ID/문서/청크/필터/score/개수 계약을 확인합니다. 어댑터가 잘못된 응답을 고쳐 숨기면 안 됩니다. 최신 측정과 남은 진단 한계는 [620개 결과 보고서](../07-results/fairness-v2-results-20260913.md)를 참고합니다.
 
 ## 관련 문서
 

@@ -57,7 +57,9 @@ public class QdrantVectorStore implements VectorStore {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("query", VectorHttpSupport.floats(request.queryVector()));
         body.put("limit", request.topK());
-        body.put("with_payload", true);
+        // Match the response contract of the other adapters; stored content/metadata is not part of search timing.
+        body.put("with_payload", List.of("id", "documentId", "chunkId"));
+        body.put("with_vector", false);
         body.put("params", Map.of("hnsw_ef", request.intParameter("hnsw_ef", properties.getDefaultEfSearch()), "exact", false));
         if (!request.filter().isEmpty()) {
             List<Map<String, Object>> must = request.filter().equals().entrySet().stream()
@@ -73,7 +75,8 @@ public class QdrantVectorStore implements VectorStore {
             JsonNode payload = point.get("payload");
             results.add(new VectorSearchResult(
                     payload.get("id").asString(), payload.get("documentId").asString(), payload.get("chunkId").asString(),
-                    point.get("score").asDouble()));
+                    properties.getMetric() == DistanceMetric.EUCLIDEAN
+                            ? -point.get("score").asDouble() : point.get("score").asDouble()));
         }
         return results;
     }

@@ -6,6 +6,8 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 
 public class VectorDatasetLoader {
     private final ObjectMapper objectMapper;
@@ -20,6 +22,12 @@ public class VectorDatasetLoader {
         int dimension = documents.getFirst().embedding().length;
         boolean invalidDimension = documents.stream().anyMatch(document -> document.embedding().length != dimension);
         if (invalidDimension) throw new IllegalArgumentException("All document vectors must use the same dimension");
+        Set<String> ids = new HashSet<>();
+        Set<String> chunkIds = new HashSet<>();
+        for (VectorDocument document : documents) {
+            if (!ids.add(document.id())) throw new IllegalArgumentException("Duplicate document vector id: " + document.id());
+            if (!chunkIds.add(document.chunkId())) throw new IllegalArgumentException("Duplicate chunkId: " + document.chunkId());
+        }
         return documents;
     }
 

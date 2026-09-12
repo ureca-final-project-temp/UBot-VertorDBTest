@@ -42,4 +42,16 @@ class VectorDatasetLoaderTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("same dimension");
     }
+
+    @Test
+    void rejectsDuplicateIdsAndInvalidNumbers() throws IOException {
+        Path file = directory.resolve("vectors.jsonl");
+        var loader = new VectorDatasetLoader(JsonMapper.builder().build());
+        Files.writeString(file, "{\"id\":\"one\",\"embedding\":[1,0]}\n{\"id\":\"one\",\"embedding\":[0,1]}\n");
+        assertThatThrownBy(() -> loader.load(file)).hasMessageContaining("Duplicate document vector id");
+        for (String vector : new String[]{"[\"1\",0]", "[null,1]", "[1e100,0]"}) {
+            Files.writeString(file, "{\"id\":\"one\",\"embedding\":" + vector + "}\n");
+            assertThatThrownBy(() -> loader.load(file)).isInstanceOf(IllegalArgumentException.class);
+        }
+    }
 }

@@ -1,12 +1,34 @@
 package com.myapp.benchmark;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
+import java.util.concurrent.ScheduledExecutorService;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ResourceCollectorTest {
+    @Test
+    @SuppressWarnings("unchecked")
+    void runningSampleCountUsesTheSameWindowAsFinalUsageWithoutStoppingTheSampler() {
+        try (var measurement = new ResourceCollector().start(List.of())) {
+            var snapshots = (List<ResourceCollector.TimedSnapshot>) ReflectionTestUtils.getField(measurement, "snapshots");
+            var sample = new ResourceCollector.Snapshot(80, 200, 1000);
+            snapshots.addAll(List.of(
+                    new ResourceCollector.TimedSnapshot(sample, 90, 110),
+                    new ResourceCollector.TimedSnapshot(sample, 110, 130),
+                    new ResourceCollector.TimedSnapshot(sample, 150, 170),
+                    new ResourceCollector.TimedSnapshot(sample, 190, 210)));
+            assertThat(measurement.sampleCount(100, 160)).isEqualTo(1);
+            assertThat(measurement.sampleCount(100, 200)).isEqualTo(2);
+            var sampler = (ScheduledExecutorService) ReflectionTestUtils.getField(measurement, "executor");
+            assertThat(sampler.isShutdown()).isFalse();
+            assertThat(measurement.usage(100, 200).samples()).isEqualTo(2);
+            assertThat(sampler.isShutdown()).isTrue();
+        }
+    }
+
     @Test
     void excludesCapturesOverlappingWarmupOrPostMeasurementIdleTime() {
         var idle = new ResourceCollector.Snapshot(0.01, 100, 1000);

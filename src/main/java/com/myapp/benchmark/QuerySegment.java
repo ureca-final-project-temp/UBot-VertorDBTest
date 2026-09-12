@@ -23,8 +23,14 @@ public record QuerySegment(
         double p99Ms,
         int scoredQueries,
         int emptyGroundTruthQueries,
-        int emptyGroundTruthViolations
+        int emptyGroundTruthViolations,
+        Double strictIdRecall
 ) {
+    public QuerySegment(int queryExecutions, Double recall, double averageMs, double p50Ms, double p95Ms,
+                        double p99Ms, int scoredQueries, int emptyGroundTruthQueries, int emptyGroundTruthViolations) {
+        this(queryExecutions, recall, averageMs, p50Ms, p95Ms, p99Ms, scoredQueries,
+                emptyGroundTruthQueries, emptyGroundTruthViolations, recall);
+    }
     public static final QuerySegment EMPTY = new QuerySegment(0, null, 0, 0, 0, 0, 0, 0, 0);
 
     static QuerySegment of(LatencyCollector.Statistics latency, Accumulator accumulator) {
@@ -35,17 +41,25 @@ public record QuerySegment(
                 : recalls.stream().mapToDouble(Double::doubleValue).average().orElse(0);
         return new QuerySegment(latency.count(), recall,
                 latency.averageMs(), latency.p50Ms(), latency.p95Ms(), latency.p99Ms(),
-                recalls.size(), accumulator.emptyGroundTruthQueries(), accumulator.emptyGroundTruthViolations());
+                recalls.size(), accumulator.emptyGroundTruthQueries(), accumulator.emptyGroundTruthViolations(),
+                accumulator.strictRecalls.isEmpty() ? null : accumulator.strictRecalls.stream()
+                        .mapToDouble(Double::doubleValue).average().orElseThrow());
     }
 
     /** Collects one slice's per-search outcomes while the recall post-processing loop runs. */
     static final class Accumulator {
         private final List<Double> recalls = new java.util.ArrayList<>();
+        private final List<Double> strictRecalls = new java.util.ArrayList<>();
         private int emptyGroundTruthQueries;
         private int emptyGroundTruthViolations;
 
         void recordScored(double recall) {
+            recordScored(recall, recall);
+        }
+
+        void recordScored(double recall, double strictRecall) {
             recalls.add(recall);
+            strictRecalls.add(strictRecall);
         }
 
         void recordEmptyGroundTruth(boolean returnedNothing) {

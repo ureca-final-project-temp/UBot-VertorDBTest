@@ -20,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -38,6 +39,7 @@ public class BenchmarkRunner {
     private final ResourceCollector resourceCollector = new ResourceCollector();
     private final BenchmarkEnvironmentCollector environmentCollector = new BenchmarkEnvironmentCollector();
     private final ResultWriter resultWriter;
+    private final HoldoutGuard holdoutGuard;
 
     public BenchmarkRunner(
             ObjectProvider<VectorStore> storeProvider,
@@ -53,6 +55,7 @@ public class BenchmarkRunner {
         this.vectorDatasetLoader = new VectorDatasetLoader(objectMapper);
         this.querySetLoader = new QuerySetLoader(objectMapper);
         this.resultWriter = new ResultWriter(objectMapper);
+        this.holdoutGuard = new HoldoutGuard(objectMapper);
     }
 
     public synchronized RunOutput run(List<BenchmarkScenario> scenarios, boolean rebuildAndLoad) {
@@ -68,15 +71,33 @@ public class BenchmarkRunner {
 
         List<VectorDocument> documents = vectorDatasetLoader.load(properties.getDocumentVectors());
         List<BenchmarkQuery> queries = querySetLoader.load(properties.getQueryDefinitions(), properties.getQueryVectors());
-        QueryPartitioner.Partition queryPartition = QueryPartitioner.split(queries, properties.getCalibrationQueryCount());
+        Map<String, Object> validation = holdoutGuard.validate(properties, scenarios, queries, indexManager.indexParameters());
+        QueryPartitioner.Partition queryPartition = "holdout".equals(properties.getMode())
+                ? new QueryPartitioner.Partition(holdoutGuard.calibrationQueries(properties), queries, "prior-inputs-in-plan",
+                        BenchmarkEnvironmentCollector.sha256(properties.getQueryVectors()))
+                : QueryPartitioner.split(queries, properties.getCalibrationQueryCount());
         validateDimensions(documents, queries, store);
+        ResponseContract contract = new ResponseContract(documents);
+        List<BenchmarkQuery> truthQueries = new ArrayList<>(queryPartition.calibration());
+        truthQueries.addAll(queryPartition.evaluation());
+        validateDimensions(documents, truthQueries, store);
+        com.myapp.domain.vector.MetadataContract.validate(documents, truthQueries);
         Map<String, Object> environmentValues = new LinkedHashMap<>(environmentCollector.collect(properties));
-        environmentValues.put("protocol", "search-parameter-sweep-v1");
+        environmentValues.put("protocol", ResultWriter.PROTOCOL);
+        environmentValues.put("mode", properties.getMode());
+        environmentValues.put("validation", validation);
+        environmentValues.put("tieTolerance", properties.getTieTolerance());
+        environmentValues.put("recallDefinition", "capped-boundary-ties-from-source-vectors; strict-ID retained");
+        environmentValues.put("searchOrder", "deterministic-shuffle-by-run-number");
+        environmentValues.put("maximumMeasurementTimeMs", properties.getMaximumMeasurementTimeMs());
+        environmentValues.put("minimumResourceSamples", properties.getMinimumResourceSamples());
+        environmentValues.put("warmupMaximumPasses", properties.getWarmupMaximumPasses());
+        environmentValues.put("warmupRelativeTolerance", properties.getWarmupRelativeTolerance());
         environmentValues.put("referenceRecallLevels", List.of(0.90, 0.95));
         environmentValues.put("minimumMeasurementTimeMs", properties.getMinimumMeasurementTimeMs());
         environmentValues.put("resourceSampling", "capture-window-contained-in-search-window");
         environmentValues.put("queryPartition", Map.of(
-                "method", "query-type-stratified-sha256",
+                "method", "holdout".equals(properties.getMode()) ? "frozen-plan-prior-vs-unseen" : "query-type-stratified-sha256",
                 "calibrationQueries", queryPartition.calibration().size(),
                 "evaluationQueries", queryPartition.evaluation().size(),
                 "calibrationIdsSha256", queryPartition.calibrationIdsSha256(),
@@ -86,39 +107,37 @@ public class BenchmarkRunner {
                         environmentValues.get("documentVectorsSha256").toString(), rebuildAndLoad)));
         Map<String, Object> environment = Map.copyOf(environmentValues);
 
-        long indexBuildTimeMs = 0;
-        long upsertTimeMs = 0;
-        if (rebuildAndLoad) {
-            long timeToReadyStarted = System.nanoTime();
-            indexManager.rebuild(documents);
-            long started = System.nanoTime();
-            upsertInBatches(store, documents);
-            upsertTimeMs = elapsedMs(started);
-            indexManager.awaitReady(documents.size(), Duration.ofMinutes(5));
-            indexBuildTimeMs = elapsedMs(timeToReadyStarted);
-        }
-        long storedVectors = store.count();
-        if (storedVectors != documents.size()) {
-            throw new IllegalStateException("Vector count mismatch: expected " + documents.size() + " but store has " + storedVectors);
-        }
-
         ExactSearchEngine exactSearch = new ExactSearchEngine(documents, properties.getMetric());
-        Map<Integer, Map<String, List<VectorSearchResult>>> groundTruthByTopK = new LinkedHashMap<>();
+        Map<Integer, Map<String, ExactGroundTruth>> groundTruthByTopK = new LinkedHashMap<>();
         List<BenchmarkResult> results = new ArrayList<>();
         ResultWriter.Artifacts artifacts = null;
         for (int scenarioIndex = 0; scenarioIndex < scenarios.size(); scenarioIndex++) {
             BenchmarkScenario scenario = scenarios.get(scenarioIndex);
-            Map<String, List<VectorSearchResult>> groundTruth = groundTruthByTopK.computeIfAbsent(
-                    scenario.topK(), ignored -> exactGroundTruth(exactSearch, queries, scenario));
-            resultWriter.writeGroundTruth(groundTruth, scenario.topK(), properties.getResultDirectory());
+            Map<String, ExactGroundTruth> groundTruth = groundTruthByTopK.computeIfAbsent(
+                    scenario.topK(), ignored -> exactGroundTruth(exactSearch, truthQueries, scenario));
+            resultWriter.writeTieGroundTruth(groundTruth, scenario.topK(), properties.getResultDirectory());
             for (int repetition = 0; repetition < scenario.repetitions(); repetition++) {
-                for (Map<String, Object> parameters : grids.get(scenarioIndex)) {
+                String buildId = UUID.randomUUID().toString();
+                long indexBuildTimeMs = -1;
+                long upsertTimeMs = -1;
+                if (rebuildAndLoad) {
+                    long readyStarted = System.nanoTime();
+                    indexManager.rebuild(documents);
+                    long loadStarted = System.nanoTime();
+                    upsertInBatches(store, documents);
+                    upsertTimeMs = elapsedMs(loadStarted);
+                    indexManager.awaitReady(documents.size(), Duration.ofMinutes(5));
+                    indexBuildTimeMs = elapsedMs(readyStarted);
+                }
+                if (store.count() != documents.size()) throw new IllegalStateException("Vector count mismatch after readiness check");
+                for (Map<String, Object> parameters : SearchParameterSweep.parametersForRun(
+                        grids.get(scenarioIndex), scenario.runNumber() + repetition)) {
                     BenchmarkScenario measurement = scenario.measurement(repetition, parameters);
                     BenchmarkResult result;
                     try {
                         result = runScenario(store, indexManager, documents, queryPartition.calibration(),
                                 queryPartition.evaluation(), measurement, groundTruth,
-                                environment, indexBuildTimeMs, upsertTimeMs);
+                                environment, indexBuildTimeMs, upsertTimeMs, buildId, rebuildAndLoad, contract);
                     } catch (RuntimeException exception) {
                         resultWriter.writeFailure(measurement, exception, properties.getResultDirectory());
                         throw exception;
@@ -126,6 +145,11 @@ public class BenchmarkRunner {
                     // Persist each completed point, including low Recall, before attempting the next value.
                     artifacts = resultWriter.write(List.of(result), properties.getResultDirectory());
                     results.add(result);
+                    if (result.audit().searchFailures() > 0) {
+                        var failure = new IllegalStateException("A vector search failed; failed measurement and query audit preserved");
+                        resultWriter.writeFailure(measurement, failure, properties.getResultDirectory());
+                        throw failure;
+                    }
                 }
             }
         }
@@ -139,19 +163,18 @@ public class BenchmarkRunner {
             List<BenchmarkQuery> calibrationQueries,
             List<BenchmarkQuery> evaluationQueries,
             BenchmarkScenario scenario,
-            Map<String, List<VectorSearchResult>> groundTruth,
+            Map<String, ExactGroundTruth> groundTruth,
             Map<String, Object> environment,
             long indexBuildTimeMs,
-            long upsertTimeMs
+            long upsertTimeMs,
+            String buildId,
+            boolean rebuilt,
+            ResponseContract contract
     ) {
         Map<String, Object> effectiveParameters = scenario.searchParameters();
         indexManager.configureSearch(effectiveParameters);
-        for (int pass = 0; pass < scenario.warmupIterations(); pass++) {
-            for (BenchmarkQuery query : evaluationQueries) store.search(request(query, scenario, effectiveParameters));
-        }
-        Map<String, Object> stabilityStateBefore = indexManager.requiresStabilityCheck()
-                ? indexManager.diagnostics()
-                : Map.of();
+        List<Double> warmup = warmup(store, evaluationQueries, scenario, effectiveParameters);
+        Map<String, Object> stabilityStateBefore = indexManager.diagnostics();
 
         LatencyCollector latency = new LatencyCollector();
         List<Callable<QueryOutcome>> tasks = new ArrayList<>();
@@ -161,9 +184,13 @@ public class BenchmarkRunner {
                 tasks.add(() -> {
                     VectorSearchRequest request = request(query, scenario, effectiveParameters);
                     long started = System.nanoTime();
-                    List<VectorSearchResult> approximate = store.search(request);
-                    latency.record(System.nanoTime() - started, filtered);
-                    return new QueryOutcome(query.queryId(), filtered, approximate);
+                    try {
+                        return new QueryOutcome(query, store.search(request), "");
+                    } catch (RuntimeException failure) {
+                        return new QueryOutcome(query, List.of(), failure.toString());
+                    } finally {
+                        latency.record(System.nanoTime() - started, filtered);
+                    }
                 });
             }
         }
@@ -181,28 +208,43 @@ public class BenchmarkRunner {
                 // Repeat complete query batches so every query type keeps the same weight.
                 futures.addAll(executor.invokeAll(tasks));
                 benchmarkEnded = System.nanoTime();
-            } while (benchmarkEnded - benchmarkStarted < properties.getMinimumMeasurementTimeMs() * 1_000_000L);
+            } while ((benchmarkEnded - benchmarkStarted < properties.getMinimumMeasurementTimeMs() * 1_000_000L
+                    || (!properties.getContainerNames().isEmpty()
+                        && resources.sampleCount(benchmarkStarted, benchmarkEnded) < properties.getMinimumResourceSamples()))
+                    && benchmarkEnded - benchmarkStarted < properties.getMaximumMeasurementTimeMs() * 1_000_000L);
             long elapsed = benchmarkEnded - benchmarkStarted;
             resourceUsage = resources.usage(benchmarkStarted, benchmarkEnded);
+            int searchFailures = 0;
+            int invalidResponses = 0;
+            Map<QueryAuditKey, Integer> queryAudit = new LinkedHashMap<>();
             // Recall is deliberately post-processed after the search workload timer closes.
             for (Future<QueryOutcome> future : futures) {
                 QueryOutcome outcome = future.get();
-                QuerySegment.Accumulator scores = outcome.filtered() ? filteredScores : unfilteredScores;
-                List<VectorSearchResult> exact = groundTruth.get(outcome.queryId());
-                if (recallCalculator.hasGroundTruth(exact)) {
-                    scores.recordScored(recallCalculator.recallAtK(exact, outcome.approximate(), scenario.topK()));
+                QuerySegment.Accumulator scores = !outcome.query().filter().isEmpty() ? filteredScores : unfilteredScores;
+                ExactGroundTruth truth = groundTruth.get(outcome.query().queryId());
+                List<String> violations = contract.violations(outcome.query(), outcome.approximate(), scenario.topK());
+                if (!outcome.error().isEmpty()) searchFailures++;
+                if (!violations.isEmpty()) invalidResponses++;
+                Double tieRecall = null;
+                Double strictRecall = null;
+                if (!truth.strictTopK().isEmpty()) {
+                    tieRecall = violations.isEmpty() ? recallCalculator.tieAwareRecallAtK(truth, outcome.approximate(), scenario.topK()) : 0;
+                    strictRecall = violations.isEmpty() ? recallCalculator.recallAtK(truth.strictTopK(), outcome.approximate(), scenario.topK()) : 0;
+                    scores.recordScored(tieRecall, strictRecall);
                 } else {
                     // A filter that matches nothing has no ranking to reproduce; the store passes
                     // only by returning nothing, and that verdict stays out of the recall average.
                     scores.recordEmptyGroundTruth(recallCalculator.returnedNothing(outcome.approximate()));
                 }
+                queryAudit.merge(new QueryAuditKey(outcome.query().queryId(), outcome.approximate(), violations,
+                        outcome.error(), tieRecall, strictRecall), 1, Integer::sum);
             }
             LatencyCollector.Statistics stats = latency.statistics();
             QuerySegment filtered = QuerySegment.of(latency.filteredStatistics(), filteredScores);
             QuerySegment unfiltered = QuerySegment.of(latency.unfilteredStatistics(), unfilteredScores);
             double recall = scoredRecall(filtered, unfiltered);
             double comparisonRecall = unfiltered.recall() == null ? recall : unfiltered.recall();
-            double qps = futures.size() / (elapsed / 1_000_000_000.0);
+            double qps = (futures.size() - searchFailures) / (elapsed / 1_000_000_000.0);
             StabilityDiagnostics stability;
             try {
                 stability = diagnoseStability(store, indexManager, calibrationQueries, scenario, groundTruth,
@@ -222,7 +264,11 @@ public class BenchmarkRunner {
                     resourceUsage.averageMemoryBytes(), resourceUsage.peakMemoryBytes(), resourceUsage.diskWriteBytes(),
                     indexManager.indexSizeBytes(), indexBuildTimeMs, upsertTimeMs, documents.size(), futures.size(),
                     scenario.concurrency(), scenario.topK(), scenario.warmupIterations(), scenario.measurementIterations(),
-                    stability, indexManager.indexParameters(), effectiveParameters, environment, Instant.now());
+                    stability, indexManager.indexParameters(), effectiveParameters, environment, Instant.now(),
+                    new MeasurementAudit(buildId, rebuilt, stabilityStateBefore, warmup, warmupStable(warmup),
+                            !properties.getContainerNames().isEmpty() && resourceUsage.samples() >= properties.getMinimumResourceSamples()
+                                    && resourceUsage.samples() > 0,
+                            searchFailures, invalidResponses, resultWriter.writeQueryAudit(queryAudit, properties.getResultDirectory())));
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Benchmark was interrupted", exception);
@@ -241,14 +287,14 @@ public class BenchmarkRunner {
         return total / scored;
     }
 
-    private Map<String, List<VectorSearchResult>> exactGroundTruth(
+    private Map<String, ExactGroundTruth> exactGroundTruth(
             ExactSearchEngine exactSearch,
             List<BenchmarkQuery> queries,
             BenchmarkScenario scenario
     ) {
-        Map<String, List<VectorSearchResult>> groundTruth = new LinkedHashMap<>();
+        Map<String, ExactGroundTruth> groundTruth = new LinkedHashMap<>();
         for (BenchmarkQuery query : queries) {
-            groundTruth.put(query.queryId(), exactSearch.search(request(query, scenario, Map.of())));
+            groundTruth.put(query.queryId(), exactSearch.groundTruth(request(query, scenario, Map.of()), properties.getTieTolerance()));
         }
         return Map.copyOf(groundTruth);
     }
@@ -261,7 +307,7 @@ public class BenchmarkRunner {
             VectorStore store,
             List<BenchmarkQuery> queries,
             BenchmarkScenario scenario,
-            Map<String, List<VectorSearchResult>> groundTruth,
+            Map<String, ExactGroundTruth> groundTruth,
             Map<String, Object> parameters,
             int concurrency
     ) {
@@ -269,12 +315,12 @@ public class BenchmarkRunner {
         for (int pass = 0; pass < scenario.measurementIterations(); pass++) {
             for (BenchmarkQuery query : queries) {
                 tasks.add(() -> {
-                    List<VectorSearchResult> exact = groundTruth.get(query.queryId());
+                    ExactGroundTruth exact = groundTruth.get(query.queryId());
                     List<VectorSearchResult> approximate = store.search(request(query, scenario, parameters));
                     // Null keeps a query with no exact result out of the calibration average instead
                     // of contributing a free 1.0 to the diagnostic Recall average.
-                    return recallCalculator.hasGroundTruth(exact)
-                            ? recallCalculator.recallAtK(exact, approximate, scenario.topK())
+                    return !exact.strictTopK().isEmpty()
+                            ? recallCalculator.tieAwareRecallAtK(exact, approximate, scenario.topK())
                             : null;
                 });
             }
@@ -299,7 +345,7 @@ public class BenchmarkRunner {
             VectorIndexManager indexManager,
             List<BenchmarkQuery> calibrationQueries,
             BenchmarkScenario scenario,
-            Map<String, List<VectorSearchResult>> groundTruth,
+            Map<String, ExactGroundTruth> groundTruth,
             Map<String, Object> parameters,
             Map<String, Object> stateBefore
     ) {
@@ -355,6 +401,16 @@ public class BenchmarkRunner {
     }
 
     private void validateScenarios(List<BenchmarkScenario> scenarios, VectorStore store, VectorIndexManager manager) {
+        if (properties.getMaximumMeasurementTimeMs() < properties.getMinimumMeasurementTimeMs()
+                || properties.getMaximumMeasurementTimeMs() > 600_000 || properties.getMaximumMeasurementTimeMs() < 1) {
+            throw new IllegalStateException("maximum-measurement-time-ms must be >= minimum and in [1, 600000]");
+        }
+        if (properties.getMinimumResourceSamples() < 0 || properties.getMinimumResourceSamples() > 1000
+                || properties.getWarmupMaximumPasses() < 3 || properties.getWarmupMaximumPasses() > 100
+                || !Double.isFinite(properties.getWarmupRelativeTolerance()) || properties.getWarmupRelativeTolerance() < 0
+                || !Double.isFinite(properties.getTieTolerance()) || properties.getTieTolerance() < 0) {
+            throw new IllegalStateException("Invalid telemetry/warmup/tie tolerance configuration");
+        }
         if (properties.getMinimumMeasurementTimeMs() < 0 || properties.getMinimumMeasurementTimeMs() > 600_000) {
             throw new IllegalStateException("benchmark.minimum-measurement-time-ms must be in [0, 600000]");
         }
@@ -379,6 +435,10 @@ public class BenchmarkRunner {
     }
 
     private void validateDimensions(List<VectorDocument> documents, List<BenchmarkQuery> queries, VectorStore store) {
+        if (properties.getMetric() == com.myapp.domain.vector.DistanceMetric.COSINE
+                && (documents.stream().anyMatch(d -> zero(d.embedding())) || queries.stream().anyMatch(q -> zero(q.embedding())))) {
+            throw new IllegalArgumentException("Cosine vectors must have a nonzero norm");
+        }
         int dimension = documents.getFirst().embedding().length;
         if (queries.stream().anyMatch(query -> query.embedding().length != dimension)) {
             throw new IllegalArgumentException("Document vectors and query vectors must use the same dimension");
@@ -413,7 +473,49 @@ public class BenchmarkRunner {
     }
 
 
-    private record QueryOutcome(String queryId, boolean filtered, List<VectorSearchResult> approximate) {
+    private boolean zero(float[] vector) {
+        for (float value : vector) if (value != 0) return false;
+        return true;
+    }
+
+    private List<Double> warmup(VectorStore store, List<BenchmarkQuery> queries, BenchmarkScenario scenario,
+                                Map<String, Object> parameters) {
+        List<Double> p95 = new ArrayList<>();
+        if (scenario.warmupIterations() == 0) return p95;
+        try (ExecutorService executor = Executors.newFixedThreadPool(scenario.concurrency())) {
+            int minimum = Math.max(3, scenario.warmupIterations());
+            for (int pass = 0; pass < Math.max(minimum, properties.getWarmupMaximumPasses()); pass++) {
+                LatencyCollector latency = new LatencyCollector();
+                List<Callable<Void>> tasks = queries.stream().<Callable<Void>>map(query -> () -> {
+                    long started = System.nanoTime();
+                    store.search(request(query, scenario, parameters));
+                    latency.record(System.nanoTime() - started, !query.filter().isEmpty());
+                    return null;
+                }).toList();
+                for (Future<Void> future : executor.invokeAll(tasks)) future.get();
+                p95.add(latency.statistics().p95Ms());
+                if (p95.size() >= minimum && warmupStable(p95)) break;
+            }
+            return List.copyOf(p95);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Warmup interrupted", exception);
+        } catch (ExecutionException exception) {
+            throw new IllegalStateException("Warmup search failed", exception.getCause());
+        }
+    }
+
+    private boolean warmupStable(List<Double> values) {
+        if (values.size() < 3) return false;
+        List<Double> last = values.subList(values.size() - 3, values.size()).stream().sorted().toList();
+        return last.getLast() - last.getFirst() <= Math.max(last.get(1), .000001) * properties.getWarmupRelativeTolerance();
+    }
+
+    private record QueryOutcome(BenchmarkQuery query, List<VectorSearchResult> approximate, String error) {
+    }
+
+    public record QueryAuditKey(String queryId, List<VectorSearchResult> results, List<String> violations,
+                               String searchError, Double tieAwareRecall, Double strictIdRecall) {
     }
 
 }

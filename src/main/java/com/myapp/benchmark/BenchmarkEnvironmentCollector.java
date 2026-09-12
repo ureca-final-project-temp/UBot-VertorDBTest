@@ -74,7 +74,7 @@ public class BenchmarkEnvironmentCollector {
         }
     }
 
-    private String sha256(Path path) {
+    public static String sha256(Path path) {
         try (InputStream input = Files.newInputStream(path)) {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] buffer = new byte[8192];

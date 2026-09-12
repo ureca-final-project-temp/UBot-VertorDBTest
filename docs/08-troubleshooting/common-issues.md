@@ -2,6 +2,8 @@
 
 증상 → 진단 → 해결 → 재검증 순서로 정리했습니다.
 
+현재 실행 기준은 [fairness-v2](../03-benchmark-design/fairness-v2.md)이고 [최신 완료 결과](../07-results/fairness-v2-results-20260913.md)는 합성 10k·1024차원·동시성 10의 620점입니다. 아래 과거 사례는 당시 조건으로만 읽습니다. 저장된 결과를 확인하려고 DB를 다시 실행하거나 기존 결과 디렉터리를 덮어쓸 필요는 없습니다.
+
 ---
 
 ## No vector store is active
@@ -149,7 +151,7 @@ docker stats --no-stream --format "{{.CPUPerc}}|{{.MemUsage}}|{{.BlockIO}}" vect
 
 - Docker 소켓 권한 확인
 - 프로필 YAML의 `benchmark.container-names`가 실제 컨테이너 이름과 일치하는지 확인
-- `measurement_time_ms`와 `resource_samples` 확인; 검색 구간은 최소 5초로 유지
+- `measurement_time_ms`와 `resource_samples` 확인; 현재 기본 최소 30초와 자원 표본 30개를 모두 확보
 
 ```yaml
 benchmark.container-names: [vector-qdrant]
@@ -161,21 +163,37 @@ benchmark.container-names: [vector-qdrant]
 
 짧은 검색이 끝난 뒤 유휴 CPU 표본을 합치면 부하 중 사용량이 과소 집계될 수 있습니다. 실제로 최초 sweep 시도 `sweep-20260911-215805`의 26개 기록에서 계측 문제를 발견했습니다. 해당 기록과 중단 사유는 별도로 보존했습니다.
 
-현재 구현은 1,000요청 단위를 최소 5초 이상 반복하고, 수집 시작·종료가 모두 검색 구간 안인 표본만 평균·최대에 사용합니다. 종료 직후 유휴 표본을 추가하지 않습니다. 실행 스크립트의 `-MinimumMeasurementTimeMs 5000` 또는 애플리케이션의 `benchmark.minimum-measurement-time-ms`를 확인합니다.
+현재 구현은 1,000요청 단위를 최소 30초·자원 표본 30개를 모두 충족하도록 반복하고, 수집 시작·종료가 모두 검색 구간 안인 표본만 평균·최대에 사용합니다. 종료 직후 유휴 표본을 추가하지 않습니다. 실행 스크립트의 `-MinimumMeasurementTimeMs 30000 -MinimumResourceSamples 30` 또는 애플리케이션의 `benchmark.minimum-measurement-time-ms`·`benchmark.minimum-resource-samples`를 확인합니다. 30표본을 얻기 위해 실제 시간은 30초보다 길어질 수 있습니다.
 
-재측정한 [전체 372개 결과](../07-results/sweep-results-20260911.md)는 검색 구간이 최소 5,001ms, 자원 표본이 최소 2개이고 CPU·RAM 누락은 0개였습니다. 숫자가 작다는 이유만으로 버리지 않고 수집 시점·실제 부하·표본 수를 함께 확인합니다.
+[과거 v1의 372개 결과](../07-results/sweep-results-20260911.md)는 검색 구간 최소 5,001ms·자원 표본 최소 2개·CPU/RAM 누락 0개였습니다. 최신 v2 620점은 검색 구간 최소 **60,210ms**, 자원 표본 최소 **30개**, 자원 증거 불완전 0개입니다. 이 둘의 조건을 합치지 않습니다. 숫자가 작다는 이유만으로 버리지 않고 수집 시점·실제 부하·표본 수를 함께 확인합니다.
 
 ---
 
 ## Recall이 0.90 또는 0.95를 넘지 않는다
 
-검색 파라미터의 실제 품질 관측입니다. Recall만으로 실행을 실패 처리하거나 구성·측정값을 제거하지 않습니다. 새 실험의 Milvus IVF_PQ 27개 점도 Recall 0.492268–0.611856 범위 그대로 보존했습니다. 전체 그리드와 산포도에서 비용 대비 품질을 해석합니다.
+검색 파라미터의 실제 품질 관측입니다. Recall만으로 실행을 실패 처리하거나 구성·측정값을 제거하지 않습니다. 최신 v2의 Milvus IVF_PQ **45점**도 혼합 Recall **0.494330–0.613918** 범위 그대로 보존했습니다. 과거 v1의 27점·0.492268–0.611856은 별도 역사 수치입니다. 전체 그리드와 산포도에서 비슷한 실제 Recall의 비용·반복 범위를 함께 해석합니다.
+
+---
+
+## summary에서 모든 구성이 eligible=false다
+
+현재 `DecisionGate`는 holdout 미실시·워밍업 경고·성능 조건을 하나의 판정에 합치고, 별도 임계값이 없으면 Recall 0.95·p95 30ms·RAM 2GiB를 적용합니다. 최신 실행은 탐색형이므로 모두 최종 독립 검증 조건을 충족하지 않은 상태이며, **30ms·2GiB는 합의된 서비스 기준도 아닙니다.** 이를 DB 장애나 전체 측정 무효로 해석하지 않습니다.
+
+코드와 기존 summary는 그대로 보존합니다. 현재 산포도 비교에서는 해당 자동 판정을 선정 근거로 쓰지 않고 측정 무결성·품질 경고·미실시 검증을 나눠 읽습니다. DB 합계 4 vCPU/8GiB와 OpenSearch의 4GiB 힙은 실행 조건이며 RAM Avg/Max는 관측 비교 지표입니다.
+
+---
+
+## 워밍업 경고 또는 Milvus verified=true인데 측정 중 Recall이 변한다
+
+최신 620점 중 워밍업 경고는 170점입니다. 200질의 pass에서 최근 3회 p95 변동 폭을 검사한 결과이며, 경고가 약 60초 본 측정 전체의 무효를 뜻하지는 않습니다. 반대로 통과도 본 측정 안정성을 보증하지 않습니다.
+
+Milvus의 별도 진단은 본 측정 뒤 수행하므로 측정 중 변동을 놓칠 수 있습니다. DISKANN 5점에서는 같은 질의의 Recall 변동이 확인됐는데도 `verified=true`였습니다. query audit·검색 설정·index/segment 상태를 함께 확인하고 경고를 보존합니다. 전체 620점이나 Milvus 전부를 버리지 않으며 진단 결함이 수정됐다고 단정하지 않습니다. 구체적인 대상은 [최신 결과 보고서](../07-results/fairness-v2-results-20260913.md)에 있습니다.
 
 ---
 
 ## 실행 중 CSV 갱신이 실패한다
 
-Windows에서 CSV를 독점적으로 연 프로그램은 Java의 임시 파일 교체를 막을 수 있습니다. 파일을 연 도구를 확인하고, 실행 중 조회는 `FileShare.ReadWrite | FileShare.Delete`로 읽습니다. 이번 실행의 로컬 `benchmark-result/sweep-20260911-220549/provenance/progress.ps1`이 그 예입니다. 일반 `Import-Csv` 예시는 실행 완료 뒤 사용합니다.
+Windows에서 CSV를 독점적으로 연 프로그램은 Java의 임시 파일 교체를 막을 수 있습니다. 파일을 연 도구를 확인하고, 실행 중 조회는 `FileShare.ReadWrite | FileShare.Delete`로 읽습니다. 과거 v1 실행의 로컬 `benchmark-result/sweep-20260911-220549/provenance/progress.ps1`이 그 예이며 현재 실행기가 자동으로 만드는 파일은 아닙니다. 일반 `Import-Csv` 예시는 실행 완료 뒤 사용합니다.
 
 ---
 
@@ -274,7 +292,7 @@ Invoke-RestMethod 'http://localhost:9200/_cluster/health?level=indices'
 
 ## 임베딩 생성이 중간에 멈춘다
 
-checkpoint 기반이라 다시 실행하면 이어서 생성합니다.
+checkpoint의 원본·모델·부분 출력 근거가 일치하면 다시 실행해 이어서 생성할 수 있습니다. 이미 검증된 최종 벡터가 있으면 새 벤치마크를 위해 재생성하지 않습니다.
 
 ```powershell
 .\gradlew.bat generateEmbeddings
@@ -284,8 +302,7 @@ checkpoint 기반이라 다시 실행하면 이어서 생성합니다.
 Resuming data/embeddings/document-vectors.jsonl.partial at record 5248
 ```
 
-`Partial output has no checkpoint` 또는 `Final and partial embedding outputs coexist`가 나오면
-`.partial`과 `.checkpoint.json`을 지우고 처음부터 다시 생성합니다.
+`Partial output has no checkpoint` 또는 `Final and partial embedding outputs coexist`는 재개 근거가 없거나 최종·부분 파일이 충돌한다는 뜻입니다. 먼저 관련 최종/부분/manifest/checkpoint를 별도로 보존하고 입력 해시·model digest·건수·출력 provenance를 확인합니다. 무조건 부분 파일을 삭제하거나 overwrite로 벡터를 바꾸면 이전 실험의 동일성 근거를 잃을 수 있습니다. 사용할 입력·출력을 확정한 뒤 새 출력 경로의 재생성 또는 검증된 기존 출력 복구를 선택합니다.
 
 ---
 

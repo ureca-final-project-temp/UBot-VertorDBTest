@@ -1,5 +1,5 @@
 # T01–T28 벡터 검색 비교 결과 — 2026-09-11
-> 현재 결과는 [전체 sweep 372개 실측 보고서](sweep-results-20260911.md)입니다.
+> **현재 기준 안내 (2026-09-13):** 최신 결과는 [fairness-v2 620개 측정·6축 산포도](fairness-v2-results-20260913.md)다. 아래는 2026-09-11 당시 실행·해석을 보존한 역사 자료이며 수치와 판정 표현을 최신 결과에 적용하지 않는다. 채점·측정·어댑터 조건이 달라 최신 620개와 합산하지 않는다.
 >
 > 역사 자료: 이 84개 결과는 목표별로 선택한 파라미터를 측정한 과거 프로토콜이다. 현재의 전체 검색 파라미터 sweep 결과가 아니다. [현재 프로토콜](../03-benchmark-design/current-protocol.md)을 적용한 새 측정과 구분한다. 원본 수치를 유지해 X=p95·Y=Recall로 다시 그린 [산포도 SVG](assets/matrix-20260911/scatter-recall-latency-all-84.svg) · [PNG](assets/matrix-20260911/scatter-recall-latency-all-84.png)에는 84개 실측과 0.90·0.95 수평 참고선이 모두 포함된다.
 

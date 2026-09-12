@@ -8,6 +8,16 @@ import java.util.Set;
 
 public class RecallCalculator {
 
+    public double tieAwareRecallAtK(ExactGroundTruth truth, List<VectorSearchResult> approximate, int k) {
+        int denominator = Math.min(k, truth.strictTopK().size());
+        if (denominator == 0) throw new IllegalArgumentException("Empty ground truth has no Recall");
+        Set<String> returned = new HashSet<>();
+        approximate.stream().limit(k).map(VectorSearchResult::id).forEach(returned::add);
+        long better = returned.stream().filter(truth.strictlyBetterIds()::contains).count();
+        long boundary = returned.stream().filter(truth.boundaryIds()::contains).count();
+        return (better + Math.min(denominator - truth.strictlyBetterIds().size(), boundary)) / (double) denominator;
+    }
+
     /**
      * Recall@K against the exact top-K.
      *

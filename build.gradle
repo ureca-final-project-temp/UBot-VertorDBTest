@@ -88,6 +88,7 @@ tasks.register('generateFilterSelectivityWorkloads', JavaExec) {
 	mainClass = 'com.myapp.tools.FilterSelectivityWorkloadGenerator'
 	args "--document-input=${providers.gradleProperty('selectivityDocumentInput').getOrElse('data/embeddings/document-vectors.jsonl')}",
 			"--query-input=${providers.gradleProperty('selectivityQueryInput').getOrElse('data/queries/queries.jsonl')}",
+			"--query-vector-input=${providers.gradleProperty('selectivityQueryVectors').getOrElse('data/embeddings/query-vectors.jsonl')}",
 			"--output-directory=${providers.gradleProperty('selectivityOutputDirectory').getOrElse('data/workloads/filter-selectivity')}",
 			"--overwrite=${providers.gradleProperty('overwriteSelectivityWorkloads').getOrElse('false')}"
 }
