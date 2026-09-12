@@ -95,8 +95,6 @@
 - D:/finalproject/CODE-GUIDE.md
 - D:/finalproject/CHANGELOG.md
 - D:/finalproject/STRUCTURE.md
-- C:/Users/eongp/Downloads/Vector DB 비교 시스템 구현 및 실험 명세서.md
-- C:/Users/eongp/Downloads/Vector DB 비교·검증 프로젝트 계획서.md
 
 서비스의 FAQ 1,012건·Top-K 5·exact 검색 설명을 현재 합성 10k·Top-K 10의 한계와 후속 검증에 반영했다. 사용자 최신 규모·산포도 판단 요청이 원본 계획의 일반적 대규모 실험 제안이나 과거 목표 표보다 우선한다. 원본 두 문서에는 2GiB/30ms 자동 탈락 조건이 없다.
 
